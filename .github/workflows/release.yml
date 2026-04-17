@@ -34,7 +34,6 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Build npm release artifacts
         run: npm run npm:pack
@@ -53,6 +52,11 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ -n "${NPM_TOKEN}" ]; then
+            cat > "${RUNNER_TEMP}/npm-token-fallback.npmrc" <<EOF
+//registry.npmjs.org/:_authToken=${NPM_TOKEN}
+registry=https://registry.npmjs.org/
+EOF
+            echo "NPM_CONFIG_USERCONFIG=${RUNNER_TEMP}/npm-token-fallback.npmrc" >> "${GITHUB_ENV}"
             echo "NODE_AUTH_TOKEN=${NPM_TOKEN}" >> "${GITHUB_ENV}"
           fi
 
