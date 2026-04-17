@@ -94,7 +94,7 @@ go run . call list_apps
 
 如果你想用 `mitmproxy` / `mitmweb` 观察 Codex 自己打到上游的请求，仓库内提供了一个默认脱敏的 addon：
 
-详细的长期复用方法、后台启动方式和样本沉淀约定，见 [docs/references/codex-network-capture.md](/Users/bytedance/projects/github/open-codex-computer-use/docs/references/codex-network-capture.md)。
+详细的长期复用方法、后台启动方式和样本沉淀约定，见 [docs/references/codex-network-capture.md](./docs/references/codex-network-capture.md)。
 
 如果你只是想快速后台启动一份抓包并让后续 Agent 复用，优先直接用：
 
@@ -135,6 +135,12 @@ https://chatgpt.com/backend-api/codex/responses
 ```
 
 它会先做 `101 Switching Protocols`，随后在 WebSocket 帧里承载 `response.create`、`response.output_text.delta` 等消息。`scripts/codex_dump.py` 会把这些帧按 JSONL 持久化到 `websocket/` 目录里，同时把匹配到的 HTTP 请求写到 `http/` 目录。
+
+现在脚本还会把当前抓包 `session_id` 对应的 `~/.codex/sessions/rollout-*.jsonl` 摘要一起写到 `local-sessions/`，所以同一个实验目录里可以直接对照看：
+
+- 模型侧的 tool decision
+- Codex 宿主侧的 `function_call`
+- 本地 tool 的 `function_call_output`
 
 仓库默认已经把 `artifacts/codex-dumps/` 加进 `.gitignore`，适合把真实抓包样本留在 repo 目录里反复分析，而不误提交到 Git。
 

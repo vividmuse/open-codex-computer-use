@@ -5,10 +5,11 @@
 默认排查顺序应该是：
 
 1. 先看 `docs/references/codex-network-capture.md` 对应的上游 HTTP / WebSocket dump。
-2. 只有当上游样本不足以解释本地 tool 行为时，再查 Codex 本地日志。
-3. 只有当本地日志仍然不够，且确实需要原始 `stdio` JSON-RPC 字节流时，才考虑 wrapper / shadow plugin / 更底层 hook。
+2. 再看同一个 dump 目录里的 `local-sessions/*.json`，这里已经会把当前 `session_id` 对应的 `function_call` / `function_call_output` 摘要一起导出来。
+3. 只有当这两层仍然不足以解释本地 tool 行为时，再查 Codex 本地日志。
+4. 只有当本地日志仍然不够，且确实需要原始 `stdio` JSON-RPC 字节流时，才考虑 wrapper / shadow plugin / 更底层 hook。
 
-大多数情况下，第 1 步已经足够；这份文档是补充路径，不是默认入口。
+大多数情况下，前 2 步已经足够；这份文档是更深一层的补充路径，不是默认入口。
 
 ## 适用场景
 
@@ -19,19 +20,21 @@
 
 ## 为什么需要这条补充路径
 
-`mitmdump` 抓到的是 Codex 到上游模型服务的 HTTP / WebSocket 流量。它很适合回答：
+`mitmdump` 抓到的是 Codex 到上游模型服务的 HTTP / WebSocket 流量；仓库内增强后的 `scripts/codex_dump.py` 还会顺手把同一个 `session_id` 的本地 session 摘要落到 `local-sessions/*.json`。这两层很适合回答：
 
 - 模型看到了什么上下文。
 - 模型何时决定调用某个 tool。
 - tool call 在模型协议层长什么样。
+- Codex 宿主最终把什么 `function_call` 分发给了本地 MCP。
+- 本地 tool 返回了什么 `function_call_output`。
 
-但对于官方 `computer-use` 这种本地 `stdio` MCP，网络抓包看不到：
+但如果你要看的问题更偏宿主内部日志视角，这两层仍然看不到：
 
-- Codex 宿主与本地 MCP server 的 `stdio` 交换细节。
-- 本地 tool 的宿主侧落盘结果。
-- 某些本地 tool 调用后的完整输出摘要。
+- Codex 宿主与本地 MCP server 的完整 `stdio` 交换字节流。
+- `logs_2.sqlite` 里额外的 host 级事件、错误分类和埋点字段。
+- 某些不在 session JSONL 摘要里的上下文。
 
-这时补看 Codex 自己的本地日志，通常就足够了。
+这时补看 Codex 自己更底层的本地日志，通常就足够了。
 
 ## 主要日志位置
 
@@ -217,8 +220,9 @@ LIMIT 100;
 ## 推荐工作流
 
 1. 先按 `docs/references/codex-network-capture.md` 抓上游样本。
-2. 如果上游样本已经能回答问题，就直接在仓库文档里沉淀结论。
-3. 如果问题落在本地 `stdio` MCP / `computer-use` 行为上，再查 `logs_2.sqlite`。
-4. 只有当本地日志仍然不够，才考虑 wrapper / shadow plugin 方案。
+2. 先看同一个 dump 目录里的 `local-sessions/*.json`，确认 `function_call` 和 `function_call_output`。
+3. 如果前两层样本已经能回答问题，就直接在仓库文档里沉淀结论。
+4. 如果问题仍然落在本地 `stdio` MCP / `computer-use` 更深一层的宿主行为上，再查 `logs_2.sqlite`。
+5. 只有当本地日志仍然不够，才考虑 wrapper / shadow plugin 方案。
 
 这个顺序能避免一上来就走高侵入、难维护的拦截路径。

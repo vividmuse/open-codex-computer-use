@@ -5,9 +5,10 @@
 默认排查顺序里，这份文档应该优先于 `docs/references/codex-local-runtime-logs.md`：
 
 - 先看上游 LLM call dump。
-- 只有当上游样本不足以解释本地 tool / MCP 行为时，才补查 Codex 自己的本地日志。
+- 再看同一个 dump 目录里的 `local-sessions/*.json`，确认本地 `function_call` / `function_call_output`。
+- 只有当这两层仍然不足以解释本地 tool / MCP 行为时，才补查 Codex 自己更底层的本地日志。
 
-尤其是官方 `computer-use` 这类本地 `stdio` MCP，网络抓包通常只能回答“模型侧发生了什么”，不能完整回答“本地 tool 最终收到了什么参数、回了什么结果”；这类问题再切到本地日志路径更合适。
+现在的 `scripts/codex_dump.py` 会利用 websocket 握手里的 `session_id`，把对应的 `~/.codex/sessions/rollout-*.jsonl` 摘要一起落到当前 session 目录里，所以很多关于官方 `computer-use` 的问题，已经不需要第一时间跳去查 `logs_2.sqlite`。
 
 ## 适用场景
 
@@ -95,12 +96,12 @@ codex exec --skip-git-repo-check -C /tmp 'reply with one word: ok'
 session_dir="artifacts/codex-dumps/$(date +%Y%m%d-%H%M%S)-basic-ok"
 mkdir -p "$session_dir"
 
-nohup mitmdump \
+nohup setsid mitmdump \
   --listen-host 127.0.0.1 \
   --listen-port 8082 \
   -s scripts/codex_dump.py \
   --set codex_dump_dir="$session_dir" \
-  >"$session_dir/mitmdump.log" 2>&1 &
+  </dev/null >"$session_dir/mitmdump.log" 2>&1 &
 
 echo $! >"$session_dir/mitmdump.pid"
 ```
@@ -163,6 +164,7 @@ https://chatgpt.com/backend-api/codex/responses
 artifacts/codex-dumps/<session-name>/
   http/
   websocket/
+  local-sessions/
 ```
 
 其中：
@@ -171,10 +173,21 @@ artifacts/codex-dumps/<session-name>/
   保存匹配到的 HTTP 请求和响应。
 - `websocket/*.jsonl`
   按事件逐行保存 WebSocket 开始、消息和结束。
+- `local-sessions/*.json`
+  从 `~/.codex/sessions/rollout-*.jsonl` 导出的结构化摘要，只保留当前抓包 `session_id` 命中的 user prompt、tool call、tool result 和 final answer。
 - `mitmdump.log`
   如果用后台方式启动，会包含 mitmdump 自身日志。
 - `mitmdump.pid`
   如果用后台方式启动，会保存后台进程 PID。
+
+把这三层串起来看，通常就能直接回答：
+
+- `websocket/`
+  模型何时决定调用哪个 tool，以及调用参数是什么。
+- `local-sessions/`
+  Codex 宿主实际把哪个 `function_call` 分发给了本地 MCP，以及 `function_call_output` 返回了什么。
+- `http/`
+  非 websocket 的补充请求，例如 `wham/apps`、plugin/config 初始化等。
 
 ## 脱敏默认值
 
@@ -205,6 +218,8 @@ artifacts/codex-dumps/<session-name>/
 4. 结束后停止 `mitmdump`。
 5. 重点分析：
    - `websocket/` 里的 `response.create`
+   - `websocket/` 里的 `response.output_item.done`，尤其是 `item.type=="function_call"`
+   - `local-sessions/` 里的对应 `tool_calls[].output`
    - `response.output_text.delta`
    - `response.completed`
 6. 把结论、差异和评估结果沉淀到仓库文档，而不是直接提交原始抓包。
@@ -219,6 +234,7 @@ artifacts/codex-dumps/<session-name>/
 - 是否设置了 `SSL_CERT_FILE=$HOME/.mitmproxy/mitmproxy-ca-cert.pem`
 - 是否在抓 `chatgpt.com/backend-api/codex/responses`
 - 是否只盯着 HTTP，而没有看 `websocket/*.jsonl`
+- 如果要看本地 tool 结果，是否同时检查了 `local-sessions/*.json`
 
 ### 2. 为什么不直接抓 `api.openai.com`
 
@@ -267,3 +283,55 @@ printf '%s\n%s\n%s\n' \
 - 插件缓存或安装态没有同步到最新
 
 不要一开始就假设是 MCP server 逻辑本身坏了。先把“宿主问题”和“server 问题”分开，排查成本会低很多。
+
+### 6. 做官方 `computer-use` 和 `open-computer-use` A/B 时，建议显式隔离另一个 plugin
+
+如果两套 plugin 同时启用，prompt 里的 tool 名称锚点会显著影响模型路由。做更纯净的 A/B 时，建议在单次 `codex exec` 上临时关闭另一套 plugin，而不是直接共存跑。
+
+仓库内已经提供 helper：
+
+```bash
+./scripts/run-isolated-codex-exec.sh computer-use --skip-git-repo-check -C /tmp \
+  '使用computer-use列出正在运行的前三个应用'
+
+./scripts/run-isolated-codex-exec.sh open-computer-use --skip-git-repo-check -C /tmp --json \
+  '使用open-computer-use列出正在运行的前三个应用'
+```
+
+它本质上只是给 `codex exec` 增加临时 config override：
+
+- `computer-use`
+  会加 `-c 'plugins."open-computer-use@open-computer-use-local".enabled=false'`
+- `open-computer-use`
+  会加 `-c 'plugins."computer-use@openai-bundled".enabled=false'`
+
+这比直接改 `~/.codex/config.toml` 更安全，因为：
+
+- 只影响当前这一条命令。
+- 不需要手工改全局配置后再恢复。
+- 更适合批量 eval 或 Agent 后台脚本。
+
+### 7. 当前这台机器上的隔离验证结论
+
+2026-04-17 的隔离样本已经验证：
+
+1. `-c 'plugins."...".enabled=false'` 这条覆写是生效的。
+2. 只保留官方 `computer-use` 时，`computer-use/list_apps` 可以正常完成。
+3. 只保留 `open-computer-use` 时，`open-computer-use/list_apps` 仍然直接返回 `user cancelled MCP tool call`。
+4. 同时，直接对 `./plugins/open-computer-use/scripts/launch-open-computer-use.sh` 发 JSON-RPC 的 `tools/list` / `tools/call list_apps` 是正常的。
+
+这说明在当前环境里：
+
+- “两套 plugin 互相干扰”不是主要问题。
+- `open-computer-use` MCP server 本身不是这一步的主故障点。
+- 更可能的瓶颈仍然在 Codex host 对第三方 plugin 调用的 gate 或会话策略上。
+
+### 8. 后台 `mitmdump` 显示启动成功，但代理端口很快就没了
+
+先看 `mitmdump.log`。仓库内 `scripts/start-codex-mitm-dump.sh` 现在会额外检查端口是否真的开始监听，但在某些受控 runner / agent 宿主里，父进程结束时仍然可能把后台子进程一起清掉。
+
+如果你遇到这种情况，优先用下面几种更稳的方式：
+
+1. 在真实登录 shell、`tmux` 或单独终端里执行 `./scripts/start-codex-mitm-dump.sh`。
+2. 或者直接前台运行 `mitmdump` / `mitmweb`，再在另一个终端执行 `codex exec`。
+3. 不要把“脚本返回了 PID”误当成“代理一定还活着”，先用 `lsof -nP -iTCP:<port> -sTCP:LISTEN` 确认监听状态。

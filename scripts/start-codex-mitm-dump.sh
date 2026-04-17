@@ -72,20 +72,42 @@ export NO_PROXY="127.0.0.1,localhost"
 export SSL_CERT_FILE="${ca_cert}"
 EOF
 
-nohup mitmdump \
+launcher=(nohup)
+if command -v setsid >/dev/null 2>&1; then
+  launcher+=(setsid)
+fi
+launcher+=(mitmdump)
+
+"${launcher[@]}" \
   --listen-host "${listen_host}" \
   --listen-port "${listen_port}" \
   -s "${addon_script}" \
   --set codex_dump_dir="${session_dir}" \
-  >"${log_path}" 2>&1 &
+  </dev/null >"${log_path}" 2>&1 &
 
 pid=$!
 echo "${pid}" >"${pid_path}"
 
-sleep 1
+for _ in $(seq 1 20); do
+  if ! kill -0 "${pid}" >/dev/null 2>&1; then
+    break
+  fi
+  if lsof -nP -iTCP:"${listen_port}" -sTCP:LISTEN >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
 
 if ! kill -0 "${pid}" >/dev/null 2>&1; then
   echo "mitmdump 启动失败，最近日志：" >&2
+  if [[ -f "${log_path}" ]]; then
+    tail -n 40 "${log_path}" >&2
+  fi
+  exit 1
+fi
+
+if ! lsof -nP -iTCP:"${listen_port}" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "mitmdump 进程已启动，但端口 ${listen_port} 尚未开始监听。" >&2
   if [[ -f "${log_path}" ]]; then
     tail -n 40 "${log_path}" >&2
   fi

@@ -50,3 +50,17 @@
 - `plugins/open-computer-use/.codex-plugin/plugin.json`
 - `docs/ARCHITECTURE.md`
 - `docs/references/codex-network-capture.md`
+
+### 🔬 Follow-up (2026-04-17 17:20)
+
+在继续做 Codex 宿主侧调试时，把“隔离另一套 plugin 再跑 case”正式收进仓库流程：
+
+- **[Isolated Exec Helper]**: 新增 `scripts/run-isolated-codex-exec.sh`，把 `computer-use` / `open-computer-use` / `all` 三种模式收成统一入口，底层通过单次 `codex exec -c 'plugins."...".enabled=false'` 做临时覆写，不改全局 `~/.codex/config.toml`。
+- **[A/B Routing Guidance]**: 在 `docs/references/codex-network-capture.md` 增补“隔离 plugin 路径”章节，明确当需要比较官方和仓库插件时，默认应该关掉另一套，避免 prompt 锚点和共存插件一起污染结论。
+- **[Verification Outcome]**: 这台机器上的隔离验证结果是：只开官方 `computer-use` 时 `list_apps` 正常；只开 `open-computer-use` 时 `list_apps` 仍然返回 `user cancelled MCP tool call`；而 direct JSON-RPC 调用仓库插件 launcher 是正常的，因此当前主瓶颈不是两套 plugin 互相干扰，而更像是 Codex host 对第三方 plugin 调用的 gate。
+
+这一步的价值不只是“跑通一个 shell alias”。之前调试里，`prompt` 文案、插件共存状态和宿主策略混在一起，很容易把路由偏差误判成 runtime 行为差异。把隔离入口收进仓库后，后续做焦点行为对比、MITM 抓样本和 eval 时，至少能先把“到底调用的是谁”固定下来。
+
+**Isolation Files:**
+- `scripts/run-isolated-codex-exec.sh`
+- `docs/references/codex-network-capture.md`

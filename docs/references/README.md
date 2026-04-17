@@ -16,8 +16,8 @@
 - `codex-computer-use-reverse-engineering/`
   - 官方 `Codex Computer Use.app` / `SkyComputerUseClient` 的持续逆向分析资料。
 - `codex-network-capture.md`
-  - 用 `mitmdump` + `scripts/codex_dump.py` 抓 Codex 上游 HTTP / WebSocket 流量，并把样本沉淀到 `artifacts/codex-dumps/` 做持续分析。
+  - 用 `mitmdump` + `scripts/codex_dump.py` 抓 Codex 上游 HTTP / WebSocket 流量，并把对应 `session_id` 的本地 `function_call` / `function_call_output` 摘要一起沉淀到 `artifacts/codex-dumps/` 做持续分析。
 - `codex-local-runtime-logs.md`
-  - 当上游 LLM dump 不足以解释本地 tool / MCP 行为时，补查 Codex 本地 `logs_2.sqlite`；默认顺序仍然是先看上游抓包，再看本地日志。
+  - 当抓包目录里的 `websocket/` + `local-sessions/` 仍不足以解释本地 tool / MCP 行为时，再补查 Codex 本地 `logs_2.sqlite`。
 - `codex-computer-use-cli.md`
   - 仓库内 `scripts/computer-use-cli/` 的用途、使用方法，以及为什么探测官方 bundled `computer-use` 时要优先走 `codex app-server` 代理而不是 direct stdio。
