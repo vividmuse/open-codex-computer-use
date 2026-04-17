@@ -10,6 +10,7 @@
 - **强制 token fallback 真正生效**：在 `publish-packages.mjs` 里，当 `NODE_AUTH_TOKEN` 已经存在时，主动清掉 GitHub Actions 暴露给 npm CLI 的 OIDC 环境变量，避免 npm 继续优先走 Trusted Publishing。
 - **绕开 setup-node 生成的 npmrc**：workflow 不再依赖 `actions/setup-node` 的 `registry-url` 配置，而是在存在 `NPM_TOKEN` 时显式写一份临时 `.npmrc` 并通过 `NPM_CONFIG_USERCONFIG` 注入，保证 CI 与本地成功路径一致。
 - **补一轮最小外部验证**：本地用同一个 `NPM_TOKEN` 对 `open-codex-computer-use-mcp` 成功发布了一个 `debug` dist-tag 的临时 prerelease，确认 token 本身具备真实 publish 能力。
+- **修正 workflow YAML 细节**：把 `.npmrc` 生成逻辑从 heredoc 改成 `printf`，避免 GitHub Actions 把 workflow 解析成无效 YAML 后出现“run 存在但没有 job”的假失败。
 
 ### 🧠 Design Intent (Why)
 
