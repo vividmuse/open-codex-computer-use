@@ -67,6 +67,21 @@ swift test
 ./scripts/run-tool-smoke-tests.sh
 ```
 
+如果你需要从仓库里直接探测官方 Codex 桌面版自带的闭源 `computer-use` 插件，优先用：
+
+```bash
+cd scripts/computer-use-cli
+go run . list-tools
+go run . call list_apps
+```
+
+这不是仓库主产物，而是一个调试/探针 CLI。它会自动在两种模式间切换：
+
+- 对官方 bundled `computer-use`，走 `codex app-server` 代理调用。
+- 对显式传入的非 Sky stdio server，走 direct MCP 连接。
+
+详细背景、约束和用法见 [docs/references/codex-computer-use-cli.md](./docs/references/codex-computer-use-cli.md)。
+
 如果你想单独看某个 app 当前会被如何序列化，可以直接跑：
 
 ```bash
@@ -135,6 +150,8 @@ https://chatgpt.com/backend-api/codex/responses
   端到端 smoke runner，会真实拉起 fixture 和 MCP server，对 9 个 tools 做回归。
 - `scripts/build-open-computer-use-app.sh`
   生成最小可运行的 `.app` bundle，便于真实授权与本地 UI 验证。
+- `scripts/computer-use-cli`
+  一个独立 Go 模块，用来探测官方 bundled `computer-use` 和普通 stdio MCP server；默认会对官方 Sky client 走 `codex app-server` 代理，避免 caller signing / launch constraint 问题。
 - `plugins/open-computer-use`
   repo-local Codex plugin 包装层，包含 plugin manifest、MCP 启动脚本和展示资源。
 - `scripts/install-codex-plugin.sh`

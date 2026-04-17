@@ -18,7 +18,7 @@
   - 键鼠输入模拟
   - fixture test bridge
 - `scripts/`
-  仓库级自动化命令，包括 smoke test 和 `.app` 打包入口。
+  仓库级自动化命令，包括 smoke test、`.app` 打包入口，以及 `scripts/computer-use-cli/` 这个用于探测官方 bundled `computer-use` 的 Go helper。
 - `docs/`
   逆向分析、执行计划、history 和项目约束。
 
@@ -66,6 +66,7 @@
 ## 关键边界
 
 - 开源版当前不复刻官方闭源实现里的 caller signing、私有 IPC、overlay UI 和 plugin 自安装逻辑。
+- 因为官方 `SkyComputerUseClient` 带有宿主侧 launch constraints，普通 stdio MCP client 在本机上可能被系统直接杀掉；如果要探测官方 bundled `computer-use`，默认应通过 `scripts/computer-use-cli` 的 app-server 模式走已签名的 Codex 宿主。
 - 当前权限引导已经具备可运行 app、深链和拖拽辅助，但还没有完全复刻官方那套嵌入式 choreography / overlay 体验。
 - screenshot 当前使用系统窗口截图 API，结果写入临时目录，不做长期持久化。
 - 会话状态现在是进程内内存态，保存每个 app 最近一次 snapshot 和 element index 映射。
