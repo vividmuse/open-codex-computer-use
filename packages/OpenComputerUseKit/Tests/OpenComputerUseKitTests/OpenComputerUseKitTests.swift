@@ -7,6 +7,24 @@ final class OpenComputerUseKitTests: XCTestCase {
         XCTAssertEqual(ToolDefinitions.all.count, 9)
     }
 
+    func testPermissionDiagnosticsListsMissingPermissionsInCanonicalOrder() {
+        let diagnostics = PermissionDiagnostics(
+            accessibilityTrusted: false,
+            screenCaptureGranted: true
+        )
+
+        XCTAssertEqual(diagnostics.missingPermissions, [.accessibility])
+    }
+
+    func testPermissionDiagnosticsHasNoMissingPermissionsWhenAllGranted() {
+        let diagnostics = PermissionDiagnostics(
+            accessibilityTrusted: true,
+            screenCaptureGranted: true
+        )
+
+        XCTAssertTrue(diagnostics.missingPermissions.isEmpty)
+    }
+
     func testKeyPressParserSupportsCommandStyleChord() throws {
         let parsed = try KeyPressParser.parse("super+c")
         XCTAssertEqual(parsed.displayValue, "c")

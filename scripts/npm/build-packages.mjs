@@ -237,7 +237,7 @@ In practice, using this package as MCP is: global install, add the JSON config, 
 ## Use
 
 \`\`\`bash
-# Check permissions and diagnose whether Accessibility / Screen Recording are granted
+# Check permissions; if Accessibility / Screen Recording is missing, open the permission onboarding window
 open-computer-use doctor
 
 # Start the stdio MCP server for Claude Desktop, Cursor, Cline, or another MCP client

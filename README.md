@@ -38,7 +38,7 @@ npm install -g open-computer-use
 安装任意一个后，都会同时提供这三个命令别名：
 
 ```bash
-# 检查当前权限状态，确认 Accessibility / Screen Recording 是否已经授权
+# 检查当前权限状态；如果有缺失会直接拉起权限 onboarding 窗口
 open-computer-use doctor
 
 # 以 stdio MCP server 模式启动，给 Claude Desktop / Cursor / Cline / 自定义 client 连接
@@ -110,6 +110,7 @@ npm install -g open-computer-use
 
 ```bash
 swift build
+# 缺权限时会打开权限 onboarding 窗口
 .build/debug/OpenComputerUse doctor
 .build/debug/OpenComputerUse list-apps
 ```

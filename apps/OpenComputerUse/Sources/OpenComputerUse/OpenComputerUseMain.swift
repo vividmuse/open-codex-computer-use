@@ -21,6 +21,9 @@ enum OpenComputerUseMain {
         case "doctor":
             let permissions = PermissionDiagnostics.current()
             print(permissions.summary)
+            if !permissions.missingPermissions.isEmpty {
+                PermissionOnboardingApp.launch()
+            }
         case "list-apps":
             print(service.listApps().primaryText ?? "")
         case "snapshot":

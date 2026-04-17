@@ -79,6 +79,10 @@ public struct PermissionDiagnostics: Sendable {
         "Permissions: accessibility=\(accessibilityTrusted ? "granted" : "missing"), screenRecording=\(screenCaptureGranted ? "granted" : "missing")"
     }
 
+    public var missingPermissions: [SystemPermissionKind] {
+        SystemPermissionKind.allCases.filter { !isGranted($0) }
+    }
+
     public func isGranted(_ permission: SystemPermissionKind) -> Bool {
         switch permission {
         case .accessibility:
