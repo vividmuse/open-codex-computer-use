@@ -19,7 +19,7 @@
   - software cursor overlay
   - fixture test bridge
 - `scripts/`
-  仓库级自动化命令，包括 smoke test、`.app` 打包入口，以及 `scripts/computer-use-cli/` 这个用于探测官方 bundled `computer-use` 的 Go helper。
+  仓库级自动化命令，包括 smoke test、`.app` 打包入口、npm 分发脚本，以及 `scripts/computer-use-cli/` 这个用于探测官方 bundled `computer-use` 的 Go helper。
 - `docs/`
   逆向分析、执行计划、history 和项目约束。
 
@@ -30,7 +30,7 @@
 - `OpenComputerUse` 默认 app 模式会拉起 `PermissionOnboardingApp`。
 - app bundle 以 `LSUIElement` agent-style 形态运行，默认不在 Dock 暴露常驻图标，但仍可按需显示权限窗口。
 - 主窗口负责渲染 `Accessibility` / `Screen & System Audio Recording` 两类权限卡片、`Allow` / `Done` 状态和 relaunch 后的状态收敛。
-- 辅助 drag panel 会跳转到对应的 `System Settings` 页面，并提供 app bundle 拖拽 tile。
+- 辅助 drag panel 会跳转到对应的 `System Settings` 页面，并把 app bundle 拖拽 tile 锚到该窗口右侧内容区的底边；它不再跟随 `Accessibility` 列表里的 `Add` / `Remove` 控件，避免页面局部布局变化导致 panel 漂移。
 - 权限状态优先基于 TCC 持久授权记录判断，避免 CLI 子进程与 GUI app 对授权状态看到不一致的结果。
 
 ### 2. MCP 层
@@ -56,6 +56,7 @@
 - `click` 在执行真实动作前后，会额外驱动一层透明 `SoftwareCursorOverlay` window：移动阶段走曲线动画，点击阶段做 pulse，动作结束后只保留一小段停驻与轻微 sway，随后自动淡出。
 - overlay 的 visual style 优先在运行时从本机官方 `Codex Computer Use.app` 的 `Package_ComputerUse.bundle` / `Package_SlimCore.bundle` 读取 `SoftwareCursor` 资产并做一次本地处理；如果本机没有这份 bundle，则回退到仓库内的矢量样式。
 - overlay 的层级不再固定 `.floating`；现在会跟随 snapshot 命中的目标 window id / layer，把自己排到该目标 window 之上，而不是粗暴压到所有前台 app 最上层。
+- overlay 的曲线路径不再只按固定 Bezier 模板生成；当 snapshot 带有目标 `windowID` 时，会对多组控制点候选做窗口命中采样，优先选“采样点仍落在目标 window 上”的路径，并在动画/idle 期间持续校验目标 window 是否还存在。
 - 动作型 tools 对普通 app 采用“非侵入优先，HID 兜底”策略：
   - `AXUIElementPerformAction`
   - `AXUIElementSetAttributeValue`
@@ -83,6 +84,8 @@
 - 单元测试：`swift test`
 - 端到端 smoke：`./scripts/run-tool-smoke-tests.sh`
 - app 打包：`./scripts/build-open-computer-use-app.sh debug`
+- npm staging：`node ./scripts/npm/build-packages.mjs`
+- release tgz：`./scripts/release-package.sh`
 - 对比样本：`artifacts/tool-comparisons/20260417-focus-behavior/`
 - 手工诊断：
   - `.build/debug/OpenComputerUse doctor`

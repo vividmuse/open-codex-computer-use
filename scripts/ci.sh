@@ -12,4 +12,8 @@ while IFS= read -r file; do
   bash -n "$file"
 done < <(find "${repo_root}/scripts" -type f -name '*.sh' | sort)
 
+while IFS= read -r file; do
+  node --check "$file"
+done < <(find "${repo_root}/scripts" -type f -name '*.mjs' | sort)
+
 echo "基础 CI 检查通过"

@@ -1,7 +1,7 @@
 PROJECT ?=
 SLUG ?=
 
-.PHONY: init build app test smoke check-docs check-repo ci release-package new-history new-plan
+.PHONY: init build app test smoke check-docs check-repo ci release-package npm-build npm-publish new-history new-plan
 
 init:
 	@if [ -z "$(PROJECT)" ]; then echo "用法: make init PROJECT=项目名"; exit 1; fi
@@ -31,6 +31,12 @@ ci:
 
 release-package:
 	./scripts/release-package.sh
+
+npm-build:
+	node ./scripts/npm/build-packages.mjs
+
+npm-publish:
+	node ./scripts/npm/publish-packages.mjs
 
 new-history:
 	@if [ -z "$(SLUG)" ]; then echo "用法: make new-history SLUG=变更名"; exit 1; fi

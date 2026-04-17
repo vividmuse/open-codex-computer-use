@@ -1,0 +1,54 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_to_npm:
+        description: "Publish the staged npm packages to npmjs.org"
+        required: true
+        default: false
+        type: boolean
+      npm_tag:
+        description: "npm dist-tag to use when publish_to_npm is enabled"
+        required: true
+        default: latest
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package-npm:
+    runs-on: macos-14
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Build npm release artifacts
+        run: npm run npm:pack
+
+      - name: Upload npm release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: npm-release-artifacts
+          path: |
+            dist/release/npm/*.tgz
+            dist/release/release-manifest.json
+          if-no-files-found: error
+
+      - name: Publish packages to npm
+        if: ${{ inputs.publish_to_npm }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          node ./scripts/npm/publish-packages.mjs \
+            --skip-build \
+            --out-dir dist/release/npm-staging \
+            --tag "${{ inputs.npm_tag }}"

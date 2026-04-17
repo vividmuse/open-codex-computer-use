@@ -21,7 +21,84 @@
 - `press_key`
 - `set_value`
 
-## 快速开始
+## npm 一键安装
+
+现在可以直接用 npm 安装预编译包，不需要用户自己先装好 Swift/Xcode 再编译：
+
+```bash
+npm install -g open-computer-use
+```
+
+下面三个包名都可以安装到同一套内容：
+
+- `open-computer-use`
+- `open-computer-use-mcp`
+- `open-codex-computer-use-mcp`
+
+安装任意一个后，都会同时提供这三个命令别名：
+
+```bash
+# 检查当前权限状态，确认 Accessibility / Screen Recording 是否已经授权
+open-computer-use doctor
+
+# 以 stdio MCP server 模式启动，给 Claude Desktop / Cursor / Cline / 自定义 client 连接
+open-computer-use mcp
+
+# 安装到本机 Codex 插件系统，作为 repo-local / local marketplace plugin 使用
+open-computer-use install-codex-plugin
+```
+
+如果你是把它当普通 stdio MCP server 配到自己的 client 里，用法基本就是：
+
+1. 全局安装一个包：
+
+```bash
+npm install -g open-computer-use
+```
+
+2. 在你的 MCP client 配置里加一段 JSON：
+
+```json
+{
+  "mcpServers": {
+    "open-computer-use": {
+      "command": "open-computer-use",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+3. 第一次实际调用前，给宿主终端或 app 授予 macOS `Accessibility` 和 `Screen Recording` 权限。
+
+也就是说，如果只是通过 MCP 使用，它现在就是“`npm install -g` + 一段配置 + 首次授权”这条路径。
+
+如果你的 client 也采用 `mcpServers` 这类 stdio MCP 配置结构，上面这段 JSON 可以直接作为起点。
+
+如果你想默认关闭点击时的软件 cursor overlay，也可以这样写：
+
+```json
+{
+  "mcpServers": {
+    "open-computer-use": {
+      "command": "open-computer-use",
+      "args": ["mcp"],
+      "env": {
+        "OPEN_COMPUTER_USE_VISUAL_CURSOR": "0"
+      }
+    }
+  }
+}
+```
+
+说明：
+
+- npm 包内已经携带预编译的 `Open Computer Use.app`，当前面向 macOS 14+。
+- 包内 `.app` 是 universal binary，同时支持 Apple Silicon 与 Intel Mac。
+- 真正执行前，宿主终端或 app 仍然需要被授予 `Accessibility` 与 `Screen Recording` 权限。
+- `open-computer-use install-codex-plugin` 会把 npm 包自身注册到本机 Codex 插件系统，不需要源码仓库路径。
+
+## 从源码运行
 
 环境要求：
 
@@ -41,7 +118,13 @@ swift build
 
 ```bash
 ./scripts/build-open-computer-use-app.sh debug
-open dist/OpenComputerUse.app
+open "dist/Open Computer Use.app"
+```
+
+如果你要产出可分发的 universal app，可以显式传：
+
+```bash
+./scripts/build-open-computer-use-app.sh --configuration release --arch universal
 ```
 
 启动 MCP server：
@@ -62,9 +145,9 @@ OPEN_COMPUTER_USE_VISUAL_CURSOR=0 .build/debug/OpenComputerUse mcp
 ./scripts/install-codex-plugin.sh
 ```
 
-这会把当前仓库注册成一个 repo-local marketplace，并启用插件 `open-computer-use`。脚本会在缺少打包产物时自动构建 `dist/OpenComputerUse.app`，写入 `~/.codex/config.toml`，并移除旧的直连 MCP 配置，避免同一组 tools 被重复注册。安装后重启 Codex 即可看到插件入口。
+这会把当前仓库注册成一个 repo-local marketplace，并启用插件 `open-computer-use`。脚本会在缺少打包产物时自动构建 `dist/Open Computer Use.app`，写入 `~/.codex/config.toml`，并移除旧的直连 MCP 配置，避免同一组 tools 被重复注册。安装后重启 Codex 即可看到插件入口。
 它还会把插件包和已构建的 app 同步到 `~/.codex/plugins/cache/open-computer-use-local/open-computer-use/<version>/`，这样 Codex 实际加载的是本机插件缓存，而不是直接从源码仓库路径启动。
-如果你之前给旧的 `OpenCodexComputerUse.app` 授过 `Accessibility` / `Screen Recording` 权限，切到 `OpenComputerUse.app` 后需要在系统设置里重新授权一次。
+如果你之前给旧的 `OpenCodexComputerUse.app` 或 `OpenComputerUse.app` 授过 `Accessibility` / `Screen Recording` 权限，切到 `Open Computer Use.app` 后通常需要在系统设置里重新授权一次。
 
 本地验证：
 
@@ -162,6 +245,8 @@ https://chatgpt.com/backend-api/codex/responses
   端到端 smoke runner，会真实拉起 fixture 和 MCP server，对 9 个 tools 做回归。
 - `scripts/build-open-computer-use-app.sh`
   生成最小可运行的 `.app` bundle，便于真实授权与本地 UI 验证。
+- `scripts/npm/`
+  生成三个 npm 包名对应的 staging 目录，并提供 dry-run / publish 脚本。
 - `scripts/computer-use-cli`
   一个独立 Go 模块，用来探测官方 bundled `computer-use` 和普通 stdio MCP server；默认会对官方 Sky client 走 `codex app-server` 代理，避免 caller signing / launch constraint 问题。
 - `plugins/open-computer-use`
@@ -177,6 +262,20 @@ https://chatgpt.com/backend-api/codex/responses
 - overlay 不再固定置顶，而是尽量按目标 window 的编号和层级排到“目标 app 之上、其他当前更高层窗口之下”的位置。
 - fixture app 为了提供稳定回归，会额外导出一份合成状态，并接受测试专用 command bridge。
 - 当前不复刻官方闭源 app 的签名边界、私有 IPC、完整 overlay choreography 和插件自安装逻辑。
+
+## npm 发布
+
+仓库现在提供了三层 npm 相关入口：
+
+```bash
+node ./scripts/npm/build-packages.mjs
+./scripts/release-package.sh
+node ./scripts/npm/publish-packages.mjs
+```
+
+- `build-packages.mjs` 会构建 universal app 并 stage 三个 npm 包目录到 `dist/npm/`。
+- `release-package.sh` 会额外把它们打成 `dist/release/npm/*.tgz`，并生成 `dist/release/release-manifest.json`。
+- `.github/workflows/release.yml` 支持在 GitHub Actions 里手动触发打包，并可在配置 `NPM_TOKEN` secret 后直接发布到 npm。
 
 ## 许可证
 

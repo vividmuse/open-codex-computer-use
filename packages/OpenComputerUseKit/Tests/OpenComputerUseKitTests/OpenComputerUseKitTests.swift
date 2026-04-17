@@ -15,7 +15,7 @@ final class OpenComputerUseKitTests: XCTestCase {
 
     func testInitializeResponseContainsToolsCapability() throws {
         let server = StdioMCPServer(service: ComputerUseService())
-        let response = server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"0.1.2"},"capabilities":{}}}"#)
+        let response = server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"0.1.4"},"capabilities":{}}}"#)
         XCTAssertNotNil(response)
         XCTAssertTrue(response!.contains(#""name":"open-computer-use""#))
         XCTAssertTrue(response!.contains(#""tools":{"listChanged":false}"#))
@@ -24,7 +24,7 @@ final class OpenComputerUseKitTests: XCTestCase {
     func testInitializeResponseContainsComputerUseInstructions() throws {
         let server = StdioMCPServer(service: ComputerUseService())
         let response = try XCTUnwrap(
-            server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"0.1.2"},"capabilities":{}}}"#)
+            server.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","clientInfo":{"name":"test","version":"0.1.4"},"capabilities":{}}}"#)
         )
         let data = try XCTUnwrap(response.data(using: .utf8))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -136,6 +136,23 @@ final class OpenComputerUseKitTests: XCTestCase {
         let midpoint = path.point(at: 0.5)
         XCTAssertNotEqual(midpoint.x, 110)
         XCTAssertNotEqual(midpoint.y, 70)
+    }
+
+    func testCursorMotionPathSupportsStraightVariantForConservativeFallback() {
+        let straightPath = CursorMotionPath(
+            start: CGPoint(x: 10, y: 20),
+            end: CGPoint(x: 210, y: 120),
+            curveDirection: 0,
+            curveScale: 0
+        )
+
+        XCTAssertEqual(straightPath.curveScale, 0)
+        XCTAssertEqual(straightPath.point(at: 0), CGPoint(x: 10, y: 20))
+        XCTAssertEqual(straightPath.point(at: 1), CGPoint(x: 210, y: 120))
+
+        let midpoint = straightPath.point(at: 0.5)
+        XCTAssertEqual(midpoint.x, 110, accuracy: 0.001)
+        XCTAssertEqual(midpoint.y, 70, accuracy: 0.001)
     }
 
     private func makeSnapshot(treeLines: [String], focusedSummary: String?, selectedText: String? = nil) -> AppSnapshot {

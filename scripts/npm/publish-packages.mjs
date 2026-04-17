@@ -1,0 +1,131 @@
+#!/usr/bin/env node
+
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, "..", "..");
+
+function printHelp() {
+  process.stdout.write(`Usage: node ./scripts/npm/publish-packages.mjs [options]
+
+Options:
+  --configuration debug|release
+  --arch native|arm64|x86_64|universal
+  --out-dir <dir>
+  --package <package-name>
+  --tag <dist-tag>
+  --dry-run
+  --skip-build
+  --provenance
+`);
+}
+
+function parseArgs(argv) {
+  const options = {
+    buildArgs: [],
+    dryRun: false,
+    outDir: path.join(repoRoot, "dist", "npm"),
+    provenance: false,
+    tag: "",
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    switch (arg) {
+      case "--configuration":
+      case "--arch":
+      case "--package":
+      case "--out-dir":
+        options.buildArgs.push(arg, argv[index + 1]);
+        if (arg === "--out-dir") {
+          options.outDir = path.resolve(repoRoot, argv[index + 1]);
+        }
+        index += 1;
+        break;
+      case "--skip-build":
+        options.buildArgs.push(arg);
+        break;
+      case "--tag":
+        options.tag = argv[index + 1];
+        index += 1;
+        break;
+      case "--dry-run":
+        options.dryRun = true;
+        break;
+      case "--provenance":
+        options.provenance = true;
+        break;
+      case "-h":
+      case "--help":
+        printHelp();
+        process.exit(0);
+      default:
+        throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+
+  return options;
+}
+
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: repoRoot,
+    stdio: "inherit",
+    ...options,
+  });
+
+  if (result.status !== 0) {
+    throw new Error(`${command} ${args.join(" ")} failed with exit code ${result.status ?? "unknown"}`);
+  }
+}
+
+function main() {
+  const options = parseArgs(process.argv.slice(2));
+
+  if (!options.dryRun && !process.env.NODE_AUTH_TOKEN) {
+    throw new Error("NODE_AUTH_TOKEN is required for npm publish.");
+  }
+
+  run("node", [path.join(repoRoot, "scripts", "npm", "build-packages.mjs"), ...options.buildArgs]);
+
+  const packageDirsResult = spawnSync(
+    "find",
+    [options.outDir, "-mindepth", "1", "-maxdepth", "1", "-type", "d"],
+    {
+      cwd: repoRoot,
+      encoding: "utf-8",
+    }
+  );
+
+  if (packageDirsResult.status !== 0) {
+    throw new Error(`Failed to enumerate staged packages in ${options.outDir}`);
+  }
+
+  const packageDirs = packageDirsResult.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort();
+
+  for (const packageDir of packageDirs) {
+    const args = ["publish", packageDir, "--access", "public"];
+    if (options.tag) {
+      args.push("--tag", options.tag);
+    }
+    if (options.provenance) {
+      args.push("--provenance");
+    }
+    if (options.dryRun) {
+      args.push("--dry-run");
+    }
+    run("npm", args, {
+      env: {
+        ...process.env,
+      },
+    });
+  }
+}
+
+main();
