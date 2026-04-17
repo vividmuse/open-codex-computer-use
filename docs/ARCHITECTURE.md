@@ -47,12 +47,14 @@
 
 - `ComputerUseService` 负责把 MCP tool 请求映射到本地能力。
 - `list_apps` 通过 `NSWorkspace` 枚举运行中的 app。
-- `get_app_state` 优先走真实 AX / 窗口截图；当目标是仓库内 fixture app 时，回退到 fixture 导出的合成状态。
+- `get_app_state` 优先走真实 AX / 窗口截图，但不再为了读状态而显式 `activate` 目标 app；当目标是仓库内 fixture app 时，回退到 fixture 导出的合成状态。
 - 普通 app 的 element frame 当前按“窗口左上角为原点”的 window-relative 坐标输出，便于后续把 `element_index` 和截图坐标统一到同一套参考系。
-- 动作型 tools 对普通 app 走：
+- 动作型 tools 对普通 app 采用“非侵入优先，HID 兜底”策略：
   - `AXUIElementPerformAction`
   - `AXUIElementSetAttributeValue`
-  - `CGEvent` 键鼠事件
+  - `AXUIElementCopyElementAtPosition` 做坐标命中，尽量把 coordinate click 反解成可操作 AX 元素
+  - `CGEvent.postToPid` 定向发送键盘事件，避免为了 `type_text` / `press_key` 抢前台
+  - 只有 drag 或无法命中 AX 元素的鼠标路径，才退回全局 `CGEvent` 键鼠事件并显式前置目标 app
 
 ### 4. Fixture Bridge
 
@@ -72,6 +74,7 @@
 - 单元测试：`swift test`
 - 端到端 smoke：`./scripts/run-tool-smoke-tests.sh`
 - app 打包：`./scripts/build-open-codex-app.sh debug`
+- 对比样本：`artifacts/tool-comparisons/20260417-focus-behavior/`
 - 手工诊断：
   - `.build/debug/OpenCodexComputerUse doctor`
   - `.build/debug/OpenCodexComputerUse snapshot <app>`

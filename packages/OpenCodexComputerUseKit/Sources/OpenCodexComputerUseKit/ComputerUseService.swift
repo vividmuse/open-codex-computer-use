@@ -41,24 +41,27 @@ public final class ComputerUseService {
             return try refreshSnapshot(for: query).renderedText
         }
 
-        InputSimulation.activate(snapshot.app)
-
         if let elementIndex {
             let record = try lookupElement(snapshot: snapshot, index: elementIndex)
 
-            if button == .left,
-               clickCount == 1,
-               let element = record.element,
-               record.rawActions.contains(kAXPressAction as String),
-               AXUIElementPerformAction(element, kAXPressAction as CFString) == .success {
+            if try performPreferredClick(on: record, button: button, clickCount: clickCount) {
                 Thread.sleep(forTimeInterval: 0.15)
             } else if let point = try globalPoint(for: record, snapshot: snapshot) {
-                try InputSimulation.click(at: point, button: button, clickCount: clickCount)
+                InputSimulation.bringAppToFrontForGlobalPointerInput(snapshot.app)
+                try InputSimulation.clickGlobally(at: point, button: button, clickCount: clickCount)
             } else {
                 throw ComputerUseError.stateUnavailable("element \(elementIndex) has no clickable frame")
             }
         } else if let x, let y {
-            try InputSimulation.click(at: try screenshotToGlobalPoint(snapshot: snapshot, x: x, y: y), button: button, clickCount: clickCount)
+            let point = CGPoint(x: x, y: y)
+
+            if let record = try hitTestElement(at: point, in: snapshot) ?? bestElement(containing: point, in: snapshot),
+               try performPreferredClick(on: record, button: button, clickCount: clickCount) {
+                Thread.sleep(forTimeInterval: 0.15)
+            } else {
+                InputSimulation.bringAppToFrontForGlobalPointerInput(snapshot.app)
+                try InputSimulation.clickGlobally(at: try screenshotToGlobalPoint(snapshot: snapshot, x: x, y: y), button: button, clickCount: clickCount)
+            }
         } else {
             throw ComputerUseError.invalidArguments("click requires either element_index or x/y")
         }
@@ -75,7 +78,7 @@ public final class ComputerUseService {
                 throw ComputerUseError.invalidArguments("fixture mode only supports the Raise secondary action")
             }
 
-            InputSimulation.activate(snapshot.app)
+            InputSimulation.bringAppToFrontForGlobalPointerInput(snapshot.app)
             return try refreshSnapshot(for: query).renderedText
         }
 
@@ -114,15 +117,14 @@ public final class ComputerUseService {
             return try refreshSnapshot(for: query).renderedText
         }
 
-        InputSimulation.activate(snapshot.app)
-
         if let rawAction = record.rawActions.first(where: { $0.caseInsensitiveCompare("AXScroll\(normalized.capitalized)ByPage") == .orderedSame }), let element = record.element {
             for _ in 0..<max(pages, 1) {
                 _ = AXUIElementPerformAction(element, rawAction as CFString)
                 Thread.sleep(forTimeInterval: 0.05)
             }
         } else if let point = try globalPoint(for: record, snapshot: snapshot) {
-            try InputSimulation.scroll(at: point, direction: normalized, pages: pages)
+            InputSimulation.bringAppToFrontForGlobalPointerInput(snapshot.app)
+            try InputSimulation.scrollGlobally(at: point, direction: normalized, pages: pages)
         } else {
             throw ComputerUseError.stateUnavailable("element \(elementIndex) has no scrollable frame")
         }
@@ -138,8 +140,8 @@ public final class ComputerUseService {
             return try refreshSnapshot(for: query).renderedText
         }
 
-        InputSimulation.activate(snapshot.app)
-        try InputSimulation.drag(
+        InputSimulation.bringAppToFrontForGlobalPointerInput(snapshot.app)
+        try InputSimulation.dragGlobally(
             from: try screenshotToGlobalPoint(snapshot: snapshot, x: fromX, y: fromY),
             to: try screenshotToGlobalPoint(snapshot: snapshot, x: toX, y: toY)
         )
@@ -154,8 +156,7 @@ public final class ComputerUseService {
             return try refreshSnapshot(for: query).renderedText
         }
 
-        InputSimulation.activate(snapshot.app)
-        try InputSimulation.typeText(text)
+        try InputSimulation.typeText(text, pid: snapshot.app.pid)
         return try refreshSnapshot(for: query).renderedText
     }
 
@@ -167,8 +168,7 @@ public final class ComputerUseService {
             return try refreshSnapshot(for: query).renderedText
         }
 
-        InputSimulation.activate(snapshot.app)
-        try InputSimulation.pressKey(key)
+        try InputSimulation.pressKey(key, pid: snapshot.app.pid)
         return try refreshSnapshot(for: query).renderedText
     }
 
@@ -243,6 +243,173 @@ public final class ComputerUseService {
         }
 
         return nil
+    }
+
+    private func performPreferredClick(on record: ElementRecord, button: MouseButtonKind, clickCount: Int) throws -> Bool {
+        guard let element = record.element, clickCount == 1 else {
+            return false
+        }
+
+        switch button {
+        case .left:
+            if try performAction(named: kAXPressAction as String, on: element, availableActions: record.rawActions) {
+                return true
+            }
+
+            if try focus(element: element) {
+                return true
+            }
+
+            if try performAction(named: kAXConfirmAction as String, on: element, availableActions: record.rawActions) {
+                return true
+            }
+        case .right:
+            if try performAction(named: kAXShowMenuAction as String, on: element, availableActions: record.rawActions) {
+                return true
+            }
+        case .middle:
+            break
+        }
+
+        return false
+    }
+
+    private func performAction(named action: String, on element: AXUIElement, availableActions: [String]) throws -> Bool {
+        guard availableActions.contains(where: { $0.caseInsensitiveCompare(action) == .orderedSame }) else {
+            return false
+        }
+
+        let result = AXUIElementPerformAction(element, action as CFString)
+        switch result {
+        case .success:
+            return true
+        case .actionUnsupported, .cannotComplete, .noValue:
+            return false
+        default:
+            throw ComputerUseError.message("AXUIElementPerformAction(\(action)) failed with \(result.rawValue)")
+        }
+    }
+
+    private func focus(element: AXUIElement) throws -> Bool {
+        guard isSettable(element: element, attribute: kAXFocusedAttribute) else {
+            return false
+        }
+
+        let result = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        switch result {
+        case .success:
+            return true
+        case .attributeUnsupported, .cannotComplete, .noValue:
+            return false
+        default:
+            throw ComputerUseError.message("AXUIElementSetAttributeValue(\(kAXFocusedAttribute)) failed with \(result.rawValue)")
+        }
+    }
+
+    private func isSettable(element: AXUIElement, attribute: String) -> Bool {
+        var settable: DarwinBoolean = false
+        let result = AXUIElementIsAttributeSettable(element, attribute as CFString, &settable)
+        return result == .success && settable.boolValue
+    }
+
+    private func bestElement(containing point: CGPoint, in snapshot: AppSnapshot) -> ElementRecord? {
+        snapshot.elements.values
+            .filter { $0.localFrame?.contains(point) ?? false }
+            .sorted { lhs, rhs in
+                let lhsPriority = clickPriority(for: lhs)
+                let rhsPriority = clickPriority(for: rhs)
+                if lhsPriority != rhsPriority {
+                    return lhsPriority < rhsPriority
+                }
+
+                return frameArea(of: lhs) < frameArea(of: rhs)
+            }
+            .first
+    }
+
+    private func hitTestElement(at point: CGPoint, in snapshot: AppSnapshot) throws -> ElementRecord? {
+        let appElement = AXUIElementCreateApplication(snapshot.app.pid)
+        let globalPoint = try screenshotToGlobalPoint(snapshot: snapshot, x: Double(point.x), y: Double(point.y))
+        var hitElement: AXUIElement?
+        let result = AXUIElementCopyElementAtPosition(appElement, Float(globalPoint.x), Float(globalPoint.y), &hitElement)
+        guard result == .success, let hitElement else {
+            return nil
+        }
+
+        let rawActions = copyActions(for: hitElement) ?? []
+        return ElementRecord(
+            index: -1,
+            identifier: nil,
+            element: hitElement,
+            localFrame: localFrame(of: hitElement, windowBounds: snapshot.windowBounds),
+            rawActions: rawActions,
+            prettyActions: rawActions
+        )
+    }
+
+    private func clickPriority(for record: ElementRecord) -> Int {
+        if record.rawActions.contains(where: {
+            $0.caseInsensitiveCompare(kAXPressAction as String) == .orderedSame ||
+            $0.caseInsensitiveCompare(kAXConfirmAction as String) == .orderedSame ||
+            $0.caseInsensitiveCompare(kAXShowMenuAction as String) == .orderedSame
+        }) {
+            return 0
+        }
+
+        if let element = record.element, isSettable(element: element, attribute: kAXFocusedAttribute) {
+            return 1
+        }
+
+        return 2
+    }
+
+    private func frameArea(of record: ElementRecord) -> CGFloat {
+        guard let frame = record.localFrame else {
+            return .greatestFiniteMagnitude
+        }
+
+        return frame.width * frame.height
+    }
+
+    private func copyActions(for element: AXUIElement) -> [String]? {
+        var actions: CFArray?
+        let result = AXUIElementCopyActionNames(element, &actions)
+        guard result == .success else {
+            return nil
+        }
+
+        return actions as? [String]
+    }
+
+    private func localFrame(of element: AXUIElement, windowBounds: CGRect?) -> CGRect? {
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        let positionResult = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue)
+        let sizeResult = AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue)
+
+        guard
+            positionResult == .success,
+            sizeResult == .success,
+            let positionValue,
+            let sizeValue
+        else {
+            return nil
+        }
+
+        let positionAXValue = positionValue as! AXValue
+        let sizeAXValue = sizeValue as! AXValue
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionAXValue, .cgPoint, &position), AXValueGetValue(sizeAXValue, .cgSize, &size) else {
+            return nil
+        }
+
+        let frame = CGRect(origin: position, size: size)
+        guard let windowBounds else {
+            return frame
+        }
+
+        return windowRelativeFrame(elementFrame: frame, windowBounds: windowBounds)
     }
 
     private func globalPoint(for record: ElementRecord, snapshot: AppSnapshot) throws -> CGPoint? {

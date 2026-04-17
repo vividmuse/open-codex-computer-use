@@ -48,9 +48,6 @@ enum SnapshotBuilder {
             throw ComputerUseError.permissionDenied("Accessibility permission is required. Run `OpenCodexComputerUse doctor` and grant access to the host terminal or app.")
         }
 
-        app.runningApplication.activate()
-        Thread.sleep(forTimeInterval: 0.25)
-
         let appElement = AXUIElementCreateApplication(app.pid)
         let systemWide = AXUIElementCreateSystemWide()
         let focusedApplication = copyElement(systemWide, attribute: kAXFocusedApplicationAttribute)
@@ -310,8 +307,10 @@ private struct TreeRenderer {
         let value = sanitizedValue(of: root)
         let axIdentifier = stringValue(of: root, attribute: kAXIdentifierAttribute)
         let traits = summarizeTraits(of: root)
-        let actions = (copyActions(root) ?? []).filter { $0 != kAXPressAction as String }
-        let prettyActions = actions.map(prettyActionName(_:))
+        let actions = copyActions(root) ?? []
+        let prettyActions = actions
+            .filter { $0 != kAXPressAction as String }
+            .map(prettyActionName(_:))
         let localFrame = resolveLocalFrame(of: root, windowBounds: context.windowBounds)
 
         let roleText = humanizeRole(role: role, subrole: subrole)

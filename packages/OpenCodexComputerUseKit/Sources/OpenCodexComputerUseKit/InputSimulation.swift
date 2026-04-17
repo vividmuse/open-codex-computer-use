@@ -43,12 +43,12 @@ enum MouseButtonKind: String {
 }
 
 enum InputSimulation {
-    static func activate(_ app: RunningAppDescriptor) {
-        app.runningApplication.activate(options: [.activateIgnoringOtherApps])
+    static func bringAppToFrontForGlobalPointerInput(_ app: RunningAppDescriptor) {
+        app.runningApplication.activate()
         Thread.sleep(forTimeInterval: 0.25)
     }
 
-    static func click(at point: CGPoint, button: MouseButtonKind, clickCount: Int) throws {
+    static func clickGlobally(at point: CGPoint, button: MouseButtonKind, clickCount: Int) throws {
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw ComputerUseError.message("Failed to create HID event source.")
         }
@@ -60,7 +60,7 @@ enum InputSimulation {
         }
     }
 
-    static func scroll(at point: CGPoint, direction: String, pages: Int) throws {
+    static func scrollGlobally(at point: CGPoint, direction: String, pages: Int) throws {
         guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: wheel1(direction: direction, pages: pages), wheel2: wheel2(direction: direction, pages: pages), wheel3: 0) else {
             throw ComputerUseError.message("Failed to create scroll event.")
         }
@@ -70,7 +70,7 @@ enum InputSimulation {
         Thread.sleep(forTimeInterval: 0.1)
     }
 
-    static func drag(from start: CGPoint, to end: CGPoint) throws {
+    static func dragGlobally(from start: CGPoint, to end: CGPoint) throws {
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw ComputerUseError.message("Failed to create HID event source.")
         }
@@ -90,7 +90,7 @@ enum InputSimulation {
         try postMouseEvent(type: .leftMouseUp, source: source, point: end, button: .left, clickState: 1)
     }
 
-    static func typeText(_ text: String) throws {
+    static func typeText(_ text: String, pid: pid_t) throws {
         for character in text.utf16 {
             var mutableCharacter = character
             guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
@@ -100,13 +100,13 @@ enum InputSimulation {
 
             down.keyboardSetUnicodeString(stringLength: 1, unicodeString: &mutableCharacter)
             up.keyboardSetUnicodeString(stringLength: 1, unicodeString: &mutableCharacter)
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
+            down.postToPid(pid)
+            up.postToPid(pid)
             Thread.sleep(forTimeInterval: 0.02)
         }
     }
 
-    static func pressKey(_ specification: String) throws {
+    static func pressKey(_ specification: String, pid: pid_t) throws {
         let parsed = try KeyPressParser.parse(specification)
         var activeFlags: CGEventFlags = []
 
@@ -117,7 +117,7 @@ enum InputSimulation {
 
             activeFlags.insert(modifier.flag)
             event.flags = activeFlags
-            event.post(tap: .cghidEventTap)
+            event.postToPid(pid)
         }
 
         guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: parsed.keyCode, keyDown: true),
@@ -127,8 +127,8 @@ enum InputSimulation {
 
         keyDown.flags = activeFlags
         keyUp.flags = activeFlags
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
+        keyDown.postToPid(pid)
+        keyUp.postToPid(pid)
 
         for modifier in parsed.modifiers.reversed() {
             guard let event = CGEvent(keyboardEventSource: nil, virtualKey: modifier.keyCode, keyDown: false) else {
@@ -136,7 +136,7 @@ enum InputSimulation {
             }
 
             event.flags = activeFlags
-            event.post(tap: .cghidEventTap)
+            event.postToPid(pid)
             activeFlags.remove(modifier.flag)
         }
 
