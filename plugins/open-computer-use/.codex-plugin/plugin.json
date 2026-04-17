@@ -1,0 +1,44 @@
+{
+  "name": "open-computer-use",
+  "version": "0.1.0",
+  "description": "Open-source macOS Computer Use MCP server packaged as a Codex plugin.",
+  "author": {
+    "name": "Leo",
+    "url": "https://github.com/iFurySt"
+  },
+  "homepage": "https://github.com/iFurySt/open-codex-computer-use",
+  "repository": "https://github.com/iFurySt/open-codex-computer-use",
+  "license": "MIT",
+  "keywords": [
+    "computer-use",
+    "macos",
+    "automation",
+    "mcp",
+    "codex"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Open Computer Use",
+    "shortDescription": "Control macOS apps from Codex with the open local server",
+    "longDescription": "Open Computer Use packages this repository's open-source macOS automation server as a Codex plugin. It exposes the same nine desktop-control MCP tools through the locally built OpenCodexComputerUse app bundle.",
+    "developerName": "Leo",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/iFurySt/open-codex-computer-use",
+    "privacyPolicyURL": "https://github.com/iFurySt/open-codex-computer-use/blob/main/SECURITY.md",
+    "termsOfServiceURL": "https://github.com/iFurySt/open-codex-computer-use/blob/main/LICENSE",
+    "defaultPrompt": [
+      "Inspect the current UI state of this Mac app without stealing focus when possible",
+      "Click through a local macOS workflow and summarize what changed",
+      "Drive the fixture app and verify the nine computer-use tools still behave correctly"
+    ],
+    "brandColor": "#0E7490",
+    "composerIcon": "./assets/open-computer-use-small.svg",
+    "logo": "./assets/open-computer-use.svg",
+    "screenshots": []
+  }
+}
