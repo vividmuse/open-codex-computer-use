@@ -192,14 +192,14 @@ strings 和运行时都指向同一组 tools：
   "app": "string",
   "direction": "string",
   "element_index": "string",
-  "pages": "integer? = 1"
+  "pages": "number? = 1"
 }
 ```
 
 - `app`：目标 app。
 - `direction`：工具说明约束为 `up` / `down` / `left` / `right`。
 - `element_index`：必须是可滚动的 element。
-- `pages`：滚动页数，默认 `1`。
+- `pages`：滚动页数，默认 `1`；官方 `1.0.755` 的 tool schema 已改为 `number`，支持小数页数。
 - 这是 element-scoped scroll，不是全局屏幕滚动。
 
 #### `drag`
@@ -250,6 +250,7 @@ strings 和运行时都指向同一组 tools：
   - `super+c`
   - `Up`
   - `KP_0`
+- 当前 `1.0.755` binary 里还能看到 `BackSpace`、`Page_Up`、`Prior`、`Next`、`F1...F12`、`KP_0...KP_9`、`KP_Enter` 等 key table 字符串；开源版 parser 已按这些常用 xdotool alias 收敛。
 
 #### `set_value`
 
