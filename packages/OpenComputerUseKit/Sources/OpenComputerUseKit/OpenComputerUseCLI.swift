@@ -6,9 +6,37 @@ public enum OpenComputerUseCLICommand: Equatable {
     case doctor
     case listApps
     case snapshot(app: String)
-    case turnEnded
+    case call(OpenComputerUseCallInvocation)
+    case turnEnded(payload: String?)
     case help(command: String?)
     case version
+}
+
+public enum OpenComputerUseCallInvocation: Equatable {
+    case single(toolName: String, argumentsJSON: String?, argumentsFile: String?)
+    case sequence(callsJSON: String?, callsFile: String?, interCallDelay: TimeInterval)
+}
+
+public let openComputerUseDefaultInterCallDelay: TimeInterval = 1
+
+public func shouldUseMacOSAppAgentProxy(
+    command: OpenComputerUseCLICommand,
+    proxyDisabled: Bool,
+    appBundleAvailable: Bool,
+    runningFromLaunchServicesAppInstance: Bool
+) -> Bool {
+    guard !proxyDisabled, appBundleAvailable else {
+        return false
+    }
+
+    switch command {
+    case .launchOnboarding:
+        return !runningFromLaunchServicesAppInstance
+    case .mcp, .doctor, .listApps, .snapshot, .call:
+        return true
+    case .turnEnded, .help, .version:
+        return false
+    }
 }
 
 public struct OpenComputerUseCLIError: LocalizedError, Equatable {
@@ -52,8 +80,10 @@ public func parseOpenComputerUseCLI(arguments: [String]) throws -> OpenComputerU
         return try parseSimpleCommand(name: "doctor", arguments: Array(arguments.dropFirst()), result: .doctor)
     case "list-apps":
         return try parseSimpleCommand(name: "list-apps", arguments: Array(arguments.dropFirst()), result: .listApps)
+    case "call":
+        return try parseCall(arguments: Array(arguments.dropFirst()))
     case "turn-ended":
-        return try parseSimpleCommand(name: "turn-ended", arguments: Array(arguments.dropFirst()), result: .turnEnded)
+        return try parseTurnEnded(arguments: Array(arguments.dropFirst()))
     case "snapshot":
         return try parseSnapshot(arguments: Array(arguments.dropFirst()))
     default:
@@ -80,7 +110,8 @@ public func openComputerUseHelpText(command: String? = nil) -> String {
           doctor               Print permission status and launch onboarding if needed.
           list-apps            Print running or recently used apps.
           snapshot <app>       Print the current accessibility snapshot for an app.
-          turn-ended           Acknowledge the host turn boundary.
+          call <tool>           Call one tool, or run a JSON array of tool calls.
+          turn-ended           Notify the running MCP process that the host turn ended.
           help [command]       Show general or command-specific help.
           version              Print the CLI version.
 
@@ -124,12 +155,32 @@ public func openComputerUseHelpText(command: String? = nil) -> String {
 
         Print the current accessibility snapshot for the target app.
         """
+    case "call":
+        return """
+        Usage:
+          open-computer-use call <tool> [--args '<json-object>']
+          open-computer-use call <tool> [--args-file <path>]
+          open-computer-use call --calls '<json-array>' [--sleep <seconds>]
+          open-computer-use call --calls-file <path> [--sleep <seconds>]
+
+        Examples:
+          open-computer-use call list_apps
+          open-computer-use call get_app_state --args '{"app":"TextEdit"}'
+          open-computer-use call --calls '[{"tool":"get_app_state","args":{"app":"TextEdit"}},{"tool":"press_key","args":{"app":"TextEdit","key":"Return"}}]'
+          open-computer-use call --calls-file examples/textedit-overlay-seq.json --sleep 0.5
+
+        The JSON array form keeps all calls in one process so follow-up actions
+        can reuse the app state and element indices captured by get_app_state.
+        Sequence execution stops after the first tool result with isError=true.
+        Sequence runs sleep \(formatOpenComputerUseDelay(openComputerUseDefaultInterCallDelay)) between successful operations by default.
+        """
     case "turn-ended":
         return """
         Usage:
-          open-computer-use turn-ended
+          open-computer-use turn-ended [--previous-notify <argv>] [payload]
 
-        Notify the local CLI that the current host turn has ended.
+        Notify a running local MCP process that the current host turn has ended.
+        Codex legacy notify appends the after-agent JSON payload as the last argument.
         """
     case "version":
         return """
@@ -172,6 +223,43 @@ private func parseSimpleCommand(
     throw OpenComputerUseCLIError(message: "\(name) does not accept any arguments", helpCommand: name)
 }
 
+private func parseTurnEnded(arguments: [String]) throws -> OpenComputerUseCLICommand {
+    if arguments.count == 1, let option = arguments.first, option == "-h" || option == "--help" {
+        return .help(command: "turn-ended")
+    }
+
+    var payload: String?
+    var index = 0
+    while index < arguments.count {
+        let argument = arguments[index]
+
+        switch argument {
+        case "--previous-notify":
+            let valueIndex = index + 1
+            guard valueIndex < arguments.count else {
+                throw OpenComputerUseCLIError(message: "--previous-notify requires a value", helpCommand: "turn-ended")
+            }
+            index = valueIndex
+        case "-h", "--help":
+            throw OpenComputerUseCLIError(message: "turn-ended help must be requested as `open-computer-use turn-ended --help`", helpCommand: "turn-ended")
+        default:
+            if argument.hasPrefix("-") {
+                throw OpenComputerUseCLIError(message: "Unknown turn-ended option: \(argument)", helpCommand: "turn-ended")
+            }
+
+            guard payload == nil else {
+                throw OpenComputerUseCLIError(message: "turn-ended accepts at most one payload argument", helpCommand: "turn-ended")
+            }
+
+            payload = argument
+        }
+
+        index += 1
+    }
+
+    return .turnEnded(payload: payload)
+}
+
 private func parseSnapshot(arguments: [String]) throws -> OpenComputerUseCLICommand {
     if arguments.count == 1 {
         let value = arguments[0]
@@ -187,4 +275,124 @@ private func parseSnapshot(arguments: [String]) throws -> OpenComputerUseCLIComm
     }
 
     throw OpenComputerUseCLIError(message: "snapshot accepts exactly one <app> argument", helpCommand: "snapshot")
+}
+
+private func parseCall(arguments: [String]) throws -> OpenComputerUseCLICommand {
+    if arguments.count == 1, let option = arguments.first, option == "-h" || option == "--help" {
+        return .help(command: "call")
+    }
+
+    var toolName: String?
+    var argumentsJSON: String?
+    var argumentsFile: String?
+    var callsJSON: String?
+    var callsFile: String?
+    var interCallDelay = openComputerUseDefaultInterCallDelay
+
+    var index = 0
+    while index < arguments.count {
+        let argument = arguments[index]
+
+        switch argument {
+        case "--args":
+            argumentsJSON = try parseOptionValue("--args", arguments: arguments, index: &index)
+        case "--args-file":
+            argumentsFile = try parseOptionValue("--args-file", arguments: arguments, index: &index)
+        case "--calls":
+            callsJSON = try parseOptionValue("--calls", arguments: arguments, index: &index)
+        case "--calls-file":
+            callsFile = try parseOptionValue("--calls-file", arguments: arguments, index: &index)
+        case "--sleep":
+            interCallDelay = try parseTimeIntervalOptionValue("--sleep", arguments: arguments, index: &index)
+        case "-h", "--help":
+            throw OpenComputerUseCLIError(message: "call help must be requested as `open-computer-use call --help`", helpCommand: "call")
+        default:
+            if argument.hasPrefix("-") {
+                throw OpenComputerUseCLIError(message: "Unknown call option: \(argument)", helpCommand: "call")
+            }
+
+            guard toolName == nil else {
+                throw OpenComputerUseCLIError(message: "call accepts at most one tool name", helpCommand: "call")
+            }
+
+            toolName = argument
+        }
+
+        index += 1
+    }
+
+    let hasSequenceInput = callsJSON != nil || callsFile != nil
+    if hasSequenceInput {
+        if callsJSON != nil, callsFile != nil {
+            throw OpenComputerUseCLIError(message: "Use either --calls or --calls-file, not both", helpCommand: "call")
+        }
+
+        if toolName != nil || argumentsJSON != nil || argumentsFile != nil {
+            throw OpenComputerUseCLIError(
+                message: "call sequence does not accept a tool name, --args, or --args-file",
+                helpCommand: "call"
+            )
+        }
+
+        return .call(.sequence(
+            callsJSON: callsJSON,
+            callsFile: callsFile,
+            interCallDelay: interCallDelay
+        ))
+    }
+
+    if argumentsJSON != nil, argumentsFile != nil {
+        throw OpenComputerUseCLIError(message: "Use either --args or --args-file, not both", helpCommand: "call")
+    }
+
+    if interCallDelay != openComputerUseDefaultInterCallDelay {
+        throw OpenComputerUseCLIError(
+            message: "--sleep is only supported with --calls or --calls-file",
+            helpCommand: "call"
+        )
+    }
+
+    guard let toolName else {
+        throw OpenComputerUseCLIError(message: "call requires a tool name or --calls/--calls-file", helpCommand: "call")
+    }
+
+    return .call(.single(toolName: toolName, argumentsJSON: argumentsJSON, argumentsFile: argumentsFile))
+}
+
+private func parseOptionValue(
+    _ option: String,
+    arguments: [String],
+    index: inout Int
+) throws -> String {
+    let valueIndex = index + 1
+    guard valueIndex < arguments.count else {
+        throw OpenComputerUseCLIError(message: "\(option) requires a value", helpCommand: "call")
+    }
+
+    index = valueIndex
+    return arguments[valueIndex]
+}
+
+private func parseTimeIntervalOptionValue(
+    _ option: String,
+    arguments: [String],
+    index: inout Int
+) throws -> TimeInterval {
+    let rawValue = try parseOptionValue(option, arguments: arguments, index: &index)
+    guard let value = Double(rawValue), value.isFinite, value >= 0 else {
+        throw OpenComputerUseCLIError(
+            message: "\(option) requires a non-negative number of seconds",
+            helpCommand: "call"
+        )
+    }
+
+    return value
+}
+
+private func formatOpenComputerUseDelay(_ delay: TimeInterval) -> String {
+    if delay.rounded() == delay {
+        return "\(Int(delay))s"
+    }
+
+    return "\(delay)s"
 }

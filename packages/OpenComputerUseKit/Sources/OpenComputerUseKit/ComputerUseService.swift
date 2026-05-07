@@ -1,6 +1,167 @@
 import AppKit
 import ApplicationServices
 import Foundation
+import ImageIO
+
+struct VisualCursorTarget: Equatable {
+    let point: CGPoint
+    let window: CursorTargetWindow?
+}
+
+struct VisualCursorScreenMapping: Equatable {
+    let screenStateFrame: CGRect
+    let appKitFrame: CGRect
+}
+
+func currentVisualCursorScreenMappings() -> [VisualCursorScreenMapping] {
+    NSScreen.screens.compactMap { screen in
+        guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return nil
+        }
+
+        return VisualCursorScreenMapping(
+            screenStateFrame: CGDisplayBounds(CGDirectDisplayID(screenNumber.uint32Value)),
+            appKitFrame: screen.frame
+        )
+    }
+}
+
+func screenStatePointToAppKitGlobalPoint(
+    fromScreenStatePoint point: CGPoint,
+    screenMappings: [VisualCursorScreenMapping] = currentVisualCursorScreenMappings()
+) -> CGPoint {
+    guard let mapping = screenMappings.first(where: { $0.screenStateFrame.contains(point) }) else {
+        return point
+    }
+
+    let localX = point.x - mapping.screenStateFrame.minX
+    let localY = point.y - mapping.screenStateFrame.minY
+
+    return CGPoint(
+        x: mapping.appKitFrame.minX + localX,
+        y: mapping.appKitFrame.maxY - localY
+    )
+}
+
+func visualCursorAppKitPoint(
+    fromScreenStatePoint point: CGPoint,
+    screenMappings: [VisualCursorScreenMapping] = currentVisualCursorScreenMappings()
+) -> CGPoint {
+    screenStatePointToAppKitGlobalPoint(
+        fromScreenStatePoint: point,
+        screenMappings: screenMappings
+    )
+}
+
+func makeVisualCursorTarget(
+    at point: CGPoint,
+    targetWindowID: CGWindowID?,
+    targetWindowLayer: Int?,
+    screenMappings: [VisualCursorScreenMapping] = currentVisualCursorScreenMappings()
+) -> VisualCursorTarget {
+    VisualCursorTarget(
+        point: screenStatePointToAppKitGlobalPoint(
+            fromScreenStatePoint: point,
+            screenMappings: screenMappings
+        ),
+        window: targetWindowID.map { CursorTargetWindow(windowID: $0, layer: targetWindowLayer ?? 0) }
+    )
+}
+
+func makeVisualCursorTarget(
+    localFrame: CGRect?,
+    windowBounds: CGRect?,
+    targetWindowID: CGWindowID?,
+    targetWindowLayer: Int?,
+    screenMappings: [VisualCursorScreenMapping] = currentVisualCursorScreenMappings()
+) -> VisualCursorTarget? {
+    guard let localFrame, let windowBounds else {
+        return nil
+    }
+
+    let point = CGPoint(
+        x: windowBounds.minX + localFrame.midX,
+        y: windowBounds.minY + localFrame.midY
+    )
+    return makeVisualCursorTarget(
+        at: point,
+        targetWindowID: targetWindowID,
+        targetWindowLayer: targetWindowLayer,
+        screenMappings: screenMappings
+    )
+}
+
+func inputFallbackDebugEnabled(environment: [String: String]) -> Bool {
+    guard let rawValue = environment["OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    else {
+        return false
+    }
+
+    return ["1", "true", "yes", "on"].contains(rawValue)
+}
+
+func globalPointerFallbacksEnabled(environment: [String: String]) -> Bool {
+    guard let rawValue = environment["OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    else {
+        return false
+    }
+
+    return ["1", "true", "yes", "on"].contains(rawValue)
+}
+
+func screenshotPixelScale(
+    screenshotPixelSize: CGSize?,
+    windowBounds: CGRect?
+) -> CGSize {
+    guard
+        let screenshotPixelSize,
+        let windowBounds,
+        windowBounds.width > 0,
+        windowBounds.height > 0,
+        screenshotPixelSize.width > 0,
+        screenshotPixelSize.height > 0
+    else {
+        return CGSize(width: 1, height: 1)
+    }
+
+    return CGSize(
+        width: screenshotPixelSize.width / windowBounds.width,
+        height: screenshotPixelSize.height / windowBounds.height
+    )
+}
+
+func screenshotPixelToWindowPoint(
+    _ point: CGPoint,
+    screenshotPixelSize: CGSize?,
+    windowBounds: CGRect?
+) -> CGPoint {
+    let scale = screenshotPixelScale(
+        screenshotPixelSize: screenshotPixelSize,
+        windowBounds: windowBounds
+    )
+    return CGPoint(
+        x: point.x / scale.width,
+        y: point.y / scale.height
+    )
+}
+
+let nonSettableSetValueErrorMessage = "Cannot set a value for an element that is not settable"
+
+func setValueAttributeIsSettable(result: AXError, settable: Bool, attribute: String) throws -> Bool {
+    guard result == .success else {
+        throw ComputerUseError.message("AXUIElementIsAttributeSettable(\(attribute)) failed with \(result.rawValue)")
+    }
+
+    return settable
+}
+
+func invalidSecondaryActionErrorMessage(action: String, elementIndex: Int) -> String {
+    "\(action) is not a valid secondary action for \(elementIndex)"
+}
 
 public final class ComputerUseService {
     private var snapshotsByApp: [String: AppSnapshot] = [:]
@@ -23,20 +184,26 @@ public final class ComputerUseService {
         let snapshot = try currentSnapshot(for: query)
         let button = MouseButtonKind(rawValue: mouseButton.lowercased()) ?? .left
         if snapshot.mode == .fixture {
+            let cursorTarget: VisualCursorTarget?
             if let elementIndex {
                 let record = try lookupElement(snapshot: snapshot, index: elementIndex)
                 guard let identifier = record.identifier else {
                     throw ComputerUseError.invalidArguments("fixture click requires an identifier-backed element")
                 }
+                cursorTarget = visualCursorTarget(for: record, snapshot: snapshot)
+                moveVisualCursor(to: cursorTarget)
                 try FixtureBridge.post(FixtureCommand(kind: "click", identifier: identifier))
             } else if let x, let y {
                 let identifier = try fixtureIdentifier(at: CGPoint(x: x, y: y), snapshot: snapshot)
+                cursorTarget = fixtureVisualCursorTarget(identifier: identifier, snapshot: snapshot)
+                moveVisualCursor(to: cursorTarget)
                 try FixtureBridge.post(FixtureCommand(kind: "click", identifier: identifier, x: x, y: y))
             } else {
                 throw ComputerUseError.invalidArguments("click requires either element_index or x/y")
             }
 
             Thread.sleep(forTimeInterval: 0.15)
+            pulseVisualCursor(at: cursorTarget, clickCount: clickCount, mouseButton: button)
             return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
         }
 
@@ -45,56 +212,73 @@ public final class ComputerUseService {
             guard let targetPoint = try globalPoint(for: record, snapshot: snapshot) else {
                 throw ComputerUseError.stateUnavailable("element \(elementIndex) has no clickable frame")
             }
-            let targetWindow = cursorTargetWindow(for: snapshot)
+            let cursorTarget = makeVisualCursorTarget(
+                at: targetPoint,
+                targetWindowID: snapshot.targetWindowID,
+                targetWindowLayer: snapshot.targetWindowLayer
+            )
 
-            VisualCursorSupport.performOnMain {
-                SoftwareCursorOverlay.moveCursor(to: targetPoint, in: targetWindow)
-            }
+            moveVisualCursor(to: cursorTarget)
 
             do {
-                if try performPreferredClick(on: record, button: button, clickCount: clickCount) {
-                    Thread.sleep(forTimeInterval: 0.15)
-                } else {
-                    InputSimulation.prepareAppForGlobalPointerInput(snapshot.app)
-                    try InputSimulation.clickGlobally(at: targetPoint, button: button, clickCount: clickCount)
+                if !(try performAXClickSequence(
+                    on: record,
+                    snapshot: snapshot,
+                    button: button,
+                    clickCount: clickCount,
+                    includeNearbyHitTesting: true
+                )) {
+                    try performNonAXClickFallback(
+                        at: targetPoint,
+                        button: button,
+                        clickCount: clickCount,
+                        targetDescription: "element_index=\(elementIndex)",
+                        snapshot: snapshot
+                    )
                 }
             } catch {
-                VisualCursorSupport.performOnMain {
-                    SoftwareCursorOverlay.settle(at: targetPoint, in: targetWindow)
-                }
+                settleVisualCursor(at: cursorTarget)
                 throw error
             }
 
-            VisualCursorSupport.performOnMain {
-                SoftwareCursorOverlay.pulseClick(at: targetPoint, clickCount: clickCount, mouseButton: button, in: targetWindow)
-            }
+            pulseVisualCursor(at: cursorTarget, clickCount: clickCount, mouseButton: button)
         } else if let x, let y {
-            let point = CGPoint(x: x, y: y)
-            let targetPoint = try screenshotToGlobalPoint(snapshot: snapshot, x: x, y: y)
-            let targetWindow = cursorTargetWindow(for: snapshot)
+            let screenshotPoint = CGPoint(x: x, y: y)
+            let point = screenshotPixelToWindowPointInSnapshot(snapshot: snapshot, point: screenshotPoint)
+            let targetPoint = try windowPointToGlobalPoint(snapshot: snapshot, point: point)
+            let cursorTarget = makeVisualCursorTarget(
+                at: targetPoint,
+                targetWindowID: snapshot.targetWindowID,
+                targetWindowLayer: snapshot.targetWindowLayer
+            )
 
-            VisualCursorSupport.performOnMain {
-                SoftwareCursorOverlay.moveCursor(to: targetPoint, in: targetWindow)
-            }
+            moveVisualCursor(to: cursorTarget)
 
             do {
                 if let record = try hitTestElement(at: point, in: snapshot) ?? bestElement(containing: point, in: snapshot),
-                   try performPreferredClick(on: record, button: button, clickCount: clickCount) {
-                    Thread.sleep(forTimeInterval: 0.15)
+                   (try performAXClickSequence(
+                       on: record,
+                       snapshot: snapshot,
+                       button: button,
+                       clickCount: clickCount,
+                       includeNearbyHitTesting: false
+                   )) {
+                    // handled
                 } else {
-                    InputSimulation.prepareAppForGlobalPointerInput(snapshot.app)
-                    try InputSimulation.clickGlobally(at: targetPoint, button: button, clickCount: clickCount)
+                    try performNonAXClickFallback(
+                        at: targetPoint,
+                        button: button,
+                        clickCount: clickCount,
+                        targetDescription: "x=\(Int(screenshotPoint.x)) y=\(Int(screenshotPoint.y))",
+                        snapshot: snapshot
+                    )
                 }
             } catch {
-                VisualCursorSupport.performOnMain {
-                    SoftwareCursorOverlay.settle(at: targetPoint, in: targetWindow)
-                }
+                settleVisualCursor(at: cursorTarget)
                 throw error
             }
 
-            VisualCursorSupport.performOnMain {
-                SoftwareCursorOverlay.pulseClick(at: targetPoint, clickCount: clickCount, mouseButton: button, in: targetWindow)
-            }
+            pulseVisualCursor(at: cursorTarget, clickCount: clickCount, mouseButton: button)
         } else {
             throw ComputerUseError.invalidArguments("click requires either element_index or x/y")
         }
@@ -108,15 +292,14 @@ public final class ComputerUseService {
 
         if snapshot.mode == .fixture {
             guard action.caseInsensitiveCompare("Raise") == .orderedSame else {
-                throw ComputerUseError.invalidArguments("fixture mode only supports the Raise secondary action")
+                throw ComputerUseError.message(invalidSecondaryActionMessage(action: action, record: record))
             }
 
-            InputSimulation.prepareAppForGlobalPointerInput(snapshot.app)
             return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
         }
 
         guard let rawAction = matchingAction(requested: action, record: record) else {
-            throw ComputerUseError.invalidArguments("element \(elementIndex) does not expose action '\(action)'")
+            throw ComputerUseError.message(invalidSecondaryActionMessage(action: action, record: record))
         }
 
         guard let element = record.element else {
@@ -132,10 +315,13 @@ public final class ComputerUseService {
         return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
     }
 
-    public func scroll(app query: String, direction: String, elementIndex: String, pages: Int) throws -> ToolCallResult {
+    public func scroll(app query: String, direction: String, elementIndex: String, pages: Double) throws -> ToolCallResult {
         let normalized = direction.lowercased()
         guard ["up", "down", "left", "right"].contains(normalized) else {
-            throw ComputerUseError.invalidArguments("scroll direction must be one of up/down/left/right")
+            throw ComputerUseError.message("Invalid scroll direction: \(direction)")
+        }
+        guard pages.isFinite, pages > 0 else {
+            throw ComputerUseError.message("pages must be > 0")
         }
 
         let snapshot = try currentSnapshot(for: query)
@@ -150,14 +336,21 @@ public final class ComputerUseService {
             return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
         }
 
-        if let rawAction = record.rawActions.first(where: { $0.caseInsensitiveCompare("AXScroll\(normalized.capitalized)ByPage") == .orderedSame }), let element = record.element {
-            for _ in 0..<max(pages, 1) {
+        if let repeatCount = integralScrollPageCount(pages),
+           let rawAction = record.rawActions.first(where: { $0.caseInsensitiveCompare("AXScroll\(normalized.capitalized)ByPage") == .orderedSame }),
+           let element = record.element {
+            for _ in 0..<repeatCount {
                 _ = AXUIElementPerformAction(element, rawAction as CFString)
                 Thread.sleep(forTimeInterval: 0.05)
             }
         } else if let point = try globalPoint(for: record, snapshot: snapshot) {
-            InputSimulation.prepareAppForGlobalPointerInput(snapshot.app)
-            try InputSimulation.scrollGlobally(at: point, direction: normalized, pages: pages)
+            try performScrollEvent(
+                at: point,
+                direction: normalized,
+                pages: pages,
+                targetDescription: "element_index=\(elementIndex)",
+                snapshot: snapshot
+            )
         } else {
             throw ComputerUseError.stateUnavailable("element \(elementIndex) has no scrollable frame")
         }
@@ -173,10 +366,13 @@ public final class ComputerUseService {
             return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
         }
 
-        InputSimulation.prepareAppForGlobalPointerInput(snapshot.app)
-        try InputSimulation.dragGlobally(
-            from: try screenshotToGlobalPoint(snapshot: snapshot, x: fromX, y: fromY),
-            to: try screenshotToGlobalPoint(snapshot: snapshot, x: toX, y: toY)
+        let start = try screenshotToGlobalPoint(snapshot: snapshot, x: fromX, y: fromY)
+        let end = try screenshotToGlobalPoint(snapshot: snapshot, x: toX, y: toY)
+        try performDragEvent(
+            from: start,
+            to: end,
+            targetDescription: "from=(\(Int(fromX)), \(Int(fromY))) to=(\(Int(toX)), \(Int(toY)))",
+            snapshot: snapshot
         )
         return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
     }
@@ -214,8 +410,11 @@ public final class ComputerUseService {
                 throw ComputerUseError.invalidArguments("fixture set_value requires a known element identifier")
             }
 
+            let cursorTarget = visualCursorTarget(for: record, snapshot: snapshot)
+            moveVisualCursor(to: cursorTarget)
             try FixtureBridge.post(FixtureCommand(kind: "set_value", identifier: identifier, value: value))
             Thread.sleep(forTimeInterval: 0.15)
+            settleVisualCursor(at: cursorTarget)
             return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
         }
 
@@ -223,12 +422,26 @@ public final class ComputerUseService {
             throw ComputerUseError.stateUnavailable("element \(elementIndex) has no backing accessibility object")
         }
 
-        let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString)
-        guard result == .success else {
-            throw ComputerUseError.message("AXUIElementSetAttributeValue failed with \(result.rawValue)")
+        guard try isSettableForSetValue(element: element, attribute: kAXValueAttribute) else {
+            throw ComputerUseError.message(nonSettableSetValueErrorMessage)
         }
 
-        Thread.sleep(forTimeInterval: 0.1)
+        let cursorTarget = visualCursorTarget(for: record, snapshot: snapshot)
+        moveVisualCursor(to: cursorTarget)
+
+        do {
+            let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString)
+            guard result == .success else {
+                throw ComputerUseError.message("AXUIElementSetAttributeValue failed with \(result.rawValue)")
+            }
+
+            Thread.sleep(forTimeInterval: 0.1)
+        } catch {
+            settleVisualCursor(at: cursorTarget)
+            throw error
+        }
+
+        settleVisualCursor(at: cursorTarget)
         return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
     }
 
@@ -278,26 +491,30 @@ public final class ComputerUseService {
         return nil
     }
 
+    private func invalidSecondaryActionMessage(action: String, record: ElementRecord) -> String {
+        invalidSecondaryActionErrorMessage(action: action, elementIndex: record.index)
+    }
+
     private func performPreferredClick(on record: ElementRecord, button: MouseButtonKind, clickCount: Int) throws -> Bool {
-        guard let element = record.element, clickCount == 1 else {
+        guard let element = record.element else {
             return false
         }
 
         switch button {
         case .left:
-            if try performAction(named: kAXPressAction as String, on: element, availableActions: record.rawActions) {
+            if try performAction(named: kAXPressAction as String, on: element, availableActions: record.rawActions, repeatCount: clickCount) {
                 return true
             }
 
-            if try focus(element: element) {
+            if try performAction(named: kAXConfirmAction as String, on: element, availableActions: record.rawActions, repeatCount: clickCount) {
                 return true
             }
 
-            if try performAction(named: kAXConfirmAction as String, on: element, availableActions: record.rawActions) {
+            if try performAction(named: "AXOpen", on: element, availableActions: record.rawActions, repeatCount: clickCount) {
                 return true
             }
         case .right:
-            if try performAction(named: kAXShowMenuAction as String, on: element, availableActions: record.rawActions) {
+            if try performAction(named: kAXShowMenuAction as String, on: element, availableActions: record.rawActions, repeatCount: clickCount) {
                 return true
             }
         case .middle:
@@ -307,35 +524,109 @@ public final class ComputerUseService {
         return false
     }
 
-    private func performAction(named action: String, on element: AXUIElement, availableActions: [String]) throws -> Bool {
+    private func performAXClickSequence(
+        on record: ElementRecord,
+        snapshot: AppSnapshot,
+        button: MouseButtonKind,
+        clickCount: Int,
+        includeNearbyHitTesting: Bool
+    ) throws -> Bool {
+        if try performPreferredClick(on: record, button: button, clickCount: clickCount) {
+            Thread.sleep(forTimeInterval: 0.15)
+            return true
+        }
+
+        for candidate in descendantClickCandidates(for: record, snapshot: snapshot) {
+            if try performPreferredClick(on: candidate, button: button, clickCount: clickCount) {
+                Thread.sleep(forTimeInterval: 0.15)
+                return true
+            }
+        }
+
+        if includeNearbyHitTesting {
+            for localPoint in clickActionPoints(for: record) {
+                guard let hitRecord = try hitTestElement(at: localPoint, in: snapshot) ?? bestElement(containing: localPoint, in: snapshot) else {
+                    continue
+                }
+
+                if try performPreferredClick(on: hitRecord, button: button, clickCount: clickCount) {
+                    Thread.sleep(forTimeInterval: 0.15)
+                    return true
+                }
+
+                for candidate in descendantClickCandidates(for: hitRecord, snapshot: snapshot) {
+                    if try performPreferredClick(on: candidate, button: button, clickCount: clickCount) {
+                        Thread.sleep(forTimeInterval: 0.15)
+                        return true
+                    }
+                }
+            }
+        }
+
+        guard button == .left, let element = record.element else {
+            return false
+        }
+
+        if try activateClickTarget(element: element, availableActions: record.rawActions) {
+            Thread.sleep(forTimeInterval: 0.15)
+            return true
+        }
+
+        return false
+    }
+
+    private func performAction(named action: String, on element: AXUIElement, availableActions: [String], repeatCount: Int = 1) throws -> Bool {
         guard availableActions.contains(where: { $0.caseInsensitiveCompare(action) == .orderedSame }) else {
             return false
         }
 
-        let result = AXUIElementPerformAction(element, action as CFString)
-        switch result {
-        case .success:
-            return true
-        case .actionUnsupported, .cannotComplete, .noValue:
-            return false
-        default:
-            throw ComputerUseError.message("AXUIElementPerformAction(\(action)) failed with \(result.rawValue)")
+        let attempts = max(repeatCount, 1)
+        for index in 0..<attempts {
+            let result = AXUIElementPerformAction(element, action as CFString)
+            switch result {
+            case .success:
+                if index < attempts - 1 {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+            case .attributeUnsupported where action.caseInsensitiveCompare("AXOpen") == .orderedSame:
+                return true
+            case .failure, .actionUnsupported, .attributeUnsupported, .cannotComplete, .noValue, .invalidUIElement, .illegalArgument:
+                return false
+            default:
+                throw ComputerUseError.message("AXUIElementPerformAction(\(action)) failed with \(result.rawValue)")
+            }
         }
+
+        return true
     }
 
-    private func focus(element: AXUIElement) throws -> Bool {
-        guard isSettable(element: element, attribute: kAXFocusedAttribute) else {
-            return false
+    private func activateClickTarget(element: AXUIElement, availableActions: [String]) throws -> Bool {
+        var activated = false
+
+        if try performAction(named: kAXRaiseAction as String, on: element, availableActions: availableActions) {
+            activated = true
         }
 
-        let result = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        if try setBoolAttribute(named: kAXMainAttribute, on: element) {
+            activated = true
+        }
+
+        if try setBoolAttribute(named: kAXFocusedAttribute, on: element) {
+            activated = true
+        }
+
+        return activated
+    }
+
+    private func setBoolAttribute(named attribute: String, on element: AXUIElement) throws -> Bool {
+        let result = AXUIElementSetAttributeValue(element, attribute as CFString, kCFBooleanTrue)
         switch result {
         case .success:
             return true
-        case .attributeUnsupported, .cannotComplete, .noValue:
+        case .failure, .attributeUnsupported, .actionUnsupported, .cannotComplete, .noValue, .invalidUIElement, .illegalArgument:
             return false
         default:
-            throw ComputerUseError.message("AXUIElementSetAttributeValue(\(kAXFocusedAttribute)) failed with \(result.rawValue)")
+            throw ComputerUseError.message("AXUIElementSetAttributeValue(\(attribute)) failed with \(result.rawValue)")
         }
     }
 
@@ -343,6 +634,16 @@ public final class ComputerUseService {
         var settable: DarwinBoolean = false
         let result = AXUIElementIsAttributeSettable(element, attribute as CFString, &settable)
         return result == .success && settable.boolValue
+    }
+
+    private func isSettableForSetValue(element: AXUIElement, attribute: String) throws -> Bool {
+        var settable = DarwinBoolean(false)
+        let result = AXUIElementIsAttributeSettable(element, attribute as CFString, &settable)
+        return try setValueAttributeIsSettable(
+            result: result,
+            settable: settable.boolValue,
+            attribute: attribute
+        )
     }
 
     private func bestElement(containing point: CGPoint, in snapshot: AppSnapshot) -> ElementRecord? {
@@ -384,12 +685,15 @@ public final class ComputerUseService {
         if record.rawActions.contains(where: {
             $0.caseInsensitiveCompare(kAXPressAction as String) == .orderedSame ||
             $0.caseInsensitiveCompare(kAXConfirmAction as String) == .orderedSame ||
-            $0.caseInsensitiveCompare(kAXShowMenuAction as String) == .orderedSame
+            $0.caseInsensitiveCompare(kAXShowMenuAction as String) == .orderedSame ||
+            $0.caseInsensitiveCompare(kAXRaiseAction as String) == .orderedSame
         }) {
             return 0
         }
 
-        if let element = record.element, isSettable(element: element, attribute: kAXFocusedAttribute) {
+        if let element = record.element,
+           isSettable(element: element, attribute: kAXMainAttribute) ||
+           isSettable(element: element, attribute: kAXFocusedAttribute) {
             return 1
         }
 
@@ -404,6 +708,73 @@ public final class ComputerUseService {
         return frame.width * frame.height
     }
 
+    private func localCenter(for record: ElementRecord) -> CGPoint? {
+        guard let frame = record.localFrame else {
+            return nil
+        }
+
+        return CGPoint(x: frame.midX, y: frame.midY)
+    }
+
+    private func clickActionPoints(for record: ElementRecord) -> [CGPoint] {
+        guard let frame = record.localFrame else {
+            return []
+        }
+
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        let leading = CGPoint(
+            x: frame.minX + min(max(frame.width * 0.3, 20), max(frame.width - 4, 20)),
+            y: frame.midY
+        )
+
+        if abs(leading.x - center.x) < 1 {
+            return [center]
+        }
+
+        return [center, leading]
+    }
+
+    private func descendantClickCandidates(for record: ElementRecord, snapshot: AppSnapshot) -> [ElementRecord] {
+        guard let element = record.element else {
+            return []
+        }
+
+        return descendantClickCandidates(of: element, windowBounds: snapshot.windowBounds)
+            .sorted { lhs, rhs in
+                let lhsPriority = clickPriority(for: lhs)
+                let rhsPriority = clickPriority(for: rhs)
+                if lhsPriority != rhsPriority {
+                    return lhsPriority < rhsPriority
+                }
+
+                return frameArea(of: lhs) < frameArea(of: rhs)
+            }
+    }
+
+    private func descendantClickCandidates(of element: AXUIElement, windowBounds: CGRect?, depth: Int = 0) -> [ElementRecord] {
+        guard depth < 3 else {
+            return []
+        }
+
+        var results: [ElementRecord] = []
+        for child in copyChildren(of: element) {
+            let rawActions = copyActions(for: child) ?? []
+            results.append(
+                ElementRecord(
+                    index: -1,
+                    identifier: nil,
+                    element: child,
+                    localFrame: localFrame(of: child, windowBounds: windowBounds),
+                    rawActions: rawActions,
+                    prettyActions: rawActions
+                )
+            )
+            results.append(contentsOf: descendantClickCandidates(of: child, windowBounds: windowBounds, depth: depth + 1))
+        }
+
+        return results
+    }
+
     private func copyActions(for element: AXUIElement) -> [String]? {
         var actions: CFArray?
         let result = AXUIElementCopyActionNames(element, &actions)
@@ -412,6 +783,16 @@ public final class ComputerUseService {
         }
 
         return actions as? [String]
+    }
+
+    private func copyChildren(of element: AXUIElement) -> [AXUIElement] {
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value)
+        guard result == .success, let value else {
+            return []
+        }
+
+        return value as? [AXUIElement] ?? []
     }
 
     private func localFrame(of element: AXUIElement, windowBounds: CGRect?) -> CGRect? {
@@ -450,16 +831,53 @@ public final class ComputerUseService {
             return nil
         }
 
-        return try screenshotToGlobalPoint(snapshot: snapshot, x: frame.midX, y: frame.midY)
+        return try windowPointToGlobalPoint(
+            snapshot: snapshot,
+            point: CGPoint(x: frame.midX, y: frame.midY)
+        )
     }
 
     private func screenshotToGlobalPoint(snapshot: AppSnapshot, x: Double, y: Double) throws -> CGPoint {
+        try windowPointToGlobalPoint(
+            snapshot: snapshot,
+            point: screenshotPixelToWindowPointInSnapshot(
+                snapshot: snapshot,
+                point: CGPoint(x: x, y: y)
+            )
+        )
+    }
+
+    private func screenshotPixelToWindowPointInSnapshot(snapshot: AppSnapshot, point: CGPoint) -> CGPoint {
+        screenshotPixelToWindowPoint(
+            point,
+            screenshotPixelSize: screenshotPixelSize(snapshot: snapshot),
+            windowBounds: snapshot.windowBounds
+        )
+    }
+
+    private func screenshotPixelSize(snapshot: AppSnapshot) -> CGSize? {
+        guard
+            let screenshotPNGData = snapshot.screenshotPNGData,
+            let imageSource = CGImageSourceCreateWithData(screenshotPNGData as CFData, nil),
+            let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
+            let pixelWidth = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+            let pixelHeight = properties[kCGImagePropertyPixelHeight] as? CGFloat,
+            pixelWidth > 0,
+            pixelHeight > 0
+        else {
+            return nil
+        }
+
+        return CGSize(width: pixelWidth, height: pixelHeight)
+    }
+
+    private func windowPointToGlobalPoint(snapshot: AppSnapshot, point: CGPoint) throws -> CGPoint {
         guard let windowBounds = snapshot.windowBounds else {
             let appReference = snapshot.app.bundleIdentifier ?? snapshot.app.name
             throw ComputerUseError.stateUnavailable("No window bounds are available for \(appReference). Run get_app_state after bringing the app on screen.")
         }
 
-        return CGPoint(x: windowBounds.minX + x, y: windowBounds.minY + y)
+        return CGPoint(x: windowBounds.minX + point.x, y: windowBounds.minY + point.y)
     }
 
     private func fixtureIdentifier(at point: CGPoint, snapshot: AppSnapshot) throws -> String {
@@ -478,15 +896,152 @@ public final class ComputerUseService {
         return identifier
     }
 
-    private func cursorTargetWindow(for snapshot: AppSnapshot) -> CursorTargetWindow? {
-        guard let windowID = snapshot.targetWindowID else {
-            return nil
+    private func visualCursorTarget(for record: ElementRecord, snapshot: AppSnapshot) -> VisualCursorTarget? {
+        makeVisualCursorTarget(
+            localFrame: record.localFrame,
+            windowBounds: snapshot.windowBounds,
+            targetWindowID: snapshot.targetWindowID,
+            targetWindowLayer: snapshot.targetWindowLayer
+        )
+    }
+
+    private func fixtureVisualCursorTarget(identifier: String, snapshot: AppSnapshot) -> VisualCursorTarget? {
+        let record = snapshot.elements.values.first { $0.identifier == identifier }
+        return record.flatMap { visualCursorTarget(for: $0, snapshot: snapshot) }
+    }
+
+    private func moveVisualCursor(to target: VisualCursorTarget?) {
+        guard let target else {
+            return
         }
 
-        return CursorTargetWindow(
-            windowID: windowID,
-            layer: snapshot.targetWindowLayer ?? 0
+        VisualCursorSupport.performOnMain {
+            SoftwareCursorOverlay.moveCursor(to: target.point, in: target.window)
+        }
+    }
+
+    private func settleVisualCursor(at target: VisualCursorTarget?) {
+        guard let target else {
+            return
+        }
+
+        VisualCursorSupport.performOnMain {
+            SoftwareCursorOverlay.settle(at: target.point, in: target.window)
+        }
+    }
+
+    private func pulseVisualCursor(at target: VisualCursorTarget?, clickCount: Int, mouseButton: MouseButtonKind) {
+        guard let target else {
+            return
+        }
+
+        VisualCursorSupport.performOnMain {
+            SoftwareCursorOverlay.pulseClick(
+                at: target.point,
+                clickCount: clickCount,
+                mouseButton: mouseButton,
+                in: target.window
+            )
+        }
+    }
+
+    private func debugInputFallback(tool: String, targetDescription: String, snapshot: AppSnapshot) {
+        guard inputFallbackDebugEnabled(environment: ProcessInfo.processInfo.environment) else {
+            return
+        }
+
+        let appReference = snapshot.app.bundleIdentifier ?? snapshot.app.name
+        fputs(
+            "[open-computer-use] global pointer fallback tool=\(tool) app=\(appReference) target=\(targetDescription)\n",
+            stderr
         )
+    }
+
+    private func integralScrollPageCount(_ pages: Double) -> Int? {
+        let rounded = pages.rounded(.toNearestOrAwayFromZero)
+        guard abs(pages - rounded) < 0.000001 else {
+            return nil
+        }
+        return max(Int(rounded), 1)
+    }
+
+    private func performScrollEvent(
+        at point: CGPoint,
+        direction: String,
+        pages: Double,
+        targetDescription: String,
+        snapshot: AppSnapshot
+    ) throws {
+        if globalPointerFallbacksEnabled(environment: ProcessInfo.processInfo.environment) {
+            debugInputFallback(
+                tool: "scroll",
+                targetDescription: targetDescription,
+                snapshot: snapshot
+            )
+            InputSimulation.prepareAppForGlobalPointerInput(snapshot.app)
+            try InputSimulation.scrollGlobally(at: point, direction: direction, pages: pages)
+            return
+        }
+
+        try InputSimulation.scrollTargeted(at: point, direction: direction, pages: pages, pid: snapshot.app.pid)
+    }
+
+    private func performDragEvent(
+        from start: CGPoint,
+        to end: CGPoint,
+        targetDescription: String,
+        snapshot: AppSnapshot
+    ) throws {
+        if globalPointerFallbacksEnabled(environment: ProcessInfo.processInfo.environment) {
+            debugInputFallback(
+                tool: "drag",
+                targetDescription: targetDescription,
+                snapshot: snapshot
+            )
+            InputSimulation.prepareAppForGlobalPointerInput(snapshot.app)
+            try InputSimulation.dragGlobally(from: start, to: end)
+            return
+        }
+
+        try InputSimulation.dragTargeted(from: start, to: end, pid: snapshot.app.pid)
+    }
+
+    private func performNonAXClickFallback(
+        at point: CGPoint,
+        button: MouseButtonKind,
+        clickCount: Int,
+        targetDescription: String,
+        snapshot: AppSnapshot
+    ) throws {
+        do {
+            try InputSimulation.clickTargeted(
+                at: point,
+                button: button,
+                clickCount: clickCount,
+                pid: snapshot.app.pid
+            )
+            return
+        } catch {
+            guard globalPointerFallbacksEnabled(environment: ProcessInfo.processInfo.environment) else {
+                throw ComputerUseError.message(
+                    "click could not be handled through accessibility, and global pointer fallback is disabled. Set OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 to allow physical-pointer fallback for this process."
+                )
+            }
+        }
+
+        guard globalPointerFallbacksEnabled(environment: ProcessInfo.processInfo.environment) else {
+            throw ComputerUseError.message(
+                "click could not be handled through accessibility, and global pointer fallback is disabled. Set OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 to allow physical-pointer fallback for this process."
+            )
+        }
+
+        debugInputFallback(
+            tool: "click",
+            targetDescription: targetDescription,
+            snapshot: snapshot
+        )
+        InputSimulation.prepareAppForGlobalPointerInput(snapshot.app)
+        try InputSimulation.clickGlobally(at: point, button: button, clickCount: clickCount)
     }
 
     private func snapshotResult(for snapshot: AppSnapshot, style: SnapshotTextStyle) -> ToolCallResult {

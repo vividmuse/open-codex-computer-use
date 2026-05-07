@@ -28,6 +28,10 @@
 
 这说明至少在官方内部调试构建里，cursor motion 不是黑盒常量，而是一组可实时调的参数。
 
+需要补一条边界：当前本机 shipping bundle
+`~/.codex/plugins/cache/openai-bundled/computer-use/1.0.750/Codex Computer Use.app`
+做整包 phrase scan 后，并没有命中 `START HANDLE`、`END HANDLE`、`ARC SIZE`、`ARC FLOW` 这些完整 label。也就是说，视频里的 slider UI 仍然是有效证据，但更像内部调试构建或未发布调试面板，而不是当前 release app 里可直接字符串恢复出来的现成界面。
+
 ### 2. `SkyComputerUseService` 里不仅有字符串，还有可恢复的 Swift motion 类型
 
 这次除了 `strings`，还额外做了两步：
@@ -277,6 +281,8 @@ CursorView
 
 `VelocityVerletSimulation` 这个名字尤其关键，因为它已经把“用什么数值方法跑 spring”暴露出来了。就现有证据看，官方更像是在做逐帧积分，而不是单纯调用一个现成的 `CASpringAnimation` 然后交给系统黑盒求值。
 
+当前已经恢复出的 shipping 默认 progress spring 为 `response=1.4`、`dampingFraction=0.9`、`dt=1/240`。按 `CloseEnoughConfiguration(progressThreshold=1.0, distanceThreshold=0.01)` 计算，endpoint-lock / close-enough 时间约为 `343 / 240 = 1.4291667s`。这意味着默认可见移动不应该再叠加一层本地距离压缩；短距离和长距离都会复用同一条 spring progress 时间线，只是路径几何和可见姿态的速度感不同。
+
 ### 3. 什么时候允许下一次交互开始
 
 `CloseEnoughConfiguration(progressThreshold, distanceThreshold)` 和 `CursorNextInteractionTiming(closeEnough, finished)` 这组类型，说明官方把“动作已足够接近，可继续下一步”和“动作完全结束”明确区分开了。
@@ -382,7 +388,7 @@ CursorView
 
 为了后续独立开源更干净，这块建议先作为单独目录推进，而不是直接和 MCP runtime 耦合：
 
-- 目录建议：`experiments/StandaloneCursorLab/`
+- 目录建议：`experiments/CursorMotion/`
 - 第一阶段先做一个纯本地 demo app，不接真实 tool call。
 - 等参数模型稳定后，再决定是否把其中的 `Motion Parameters` / `Path Builder` 下沉回 `packages/` 复用。
 
