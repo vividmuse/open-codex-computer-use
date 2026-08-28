@@ -1119,6 +1119,12 @@ final class OpenComputerUseKitTests: XCTestCase {
             localFrame: CGRect(x: 10, y: 10, width: 240, height: 120)
         ))
         XCTAssertFalse(shouldRenderCompactGenericActionTarget(
+            role: kAXGroupRole as String,
+            hasPrimaryClickAction: true,
+            localFrame: CGRect(x: 10, y: 10, width: 117, height: 35),
+            hasActionableLinkDescendant: true
+        ))
+        XCTAssertFalse(shouldRenderCompactGenericActionTarget(
             role: kAXButtonRole as String,
             hasPrimaryClickAction: true,
             localFrame: CGRect(x: 10, y: 10, width: 32, height: 32)
