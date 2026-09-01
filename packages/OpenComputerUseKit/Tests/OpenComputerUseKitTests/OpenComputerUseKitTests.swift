@@ -4,6 +4,22 @@ import XCTest
 @testable import OpenComputerUseKit
 
 final class OpenComputerUseKitTests: XCTestCase {
+    func testAppAgentSocketFileNamePreservesLegacyDefault() {
+        XCTAssertEqual(openComputerUseAppAgentSocketFileName(namespace: nil), "open-computer-use-agent.sock")
+        XCTAssertEqual(openComputerUseAppAgentSocketFileName(namespace: "   "), "open-computer-use-agent.sock")
+    }
+
+    func testAppAgentSocketFileNameIsDeterministicAndNamespaced() {
+        let first = openComputerUseAppAgentSocketFileName(namespace: "boss-resume:profile-a")
+        let second = openComputerUseAppAgentSocketFileName(namespace: "boss-resume:profile-b")
+
+        XCTAssertEqual(first, openComputerUseAppAgentSocketFileName(namespace: "boss-resume:profile-a"))
+        XCTAssertNotEqual(first, second)
+        XCTAssertTrue(first.hasPrefix("open-computer-use-agent-"))
+        XCTAssertTrue(first.hasSuffix(".sock"))
+        XCTAssertLessThan(first.count, 80)
+    }
+
     func testCLIRecognizesGlobalHelpAndVersionFlags() throws {
         XCTAssertEqual(try parseOpenComputerUseCLI(arguments: ["-h"]), .help(command: nil))
         XCTAssertEqual(try parseOpenComputerUseCLI(arguments: ["--help"]), .help(command: nil))
