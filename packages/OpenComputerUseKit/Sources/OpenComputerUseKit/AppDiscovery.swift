@@ -13,11 +13,15 @@ struct ListedAppDescriptor {
     let name: String
     let bundleIdentifier: String
     let isRunning: Bool
+    let isFrontmost: Bool
     let lastUsed: Date?
     let uses: Int?
 
     var renderedLine: String {
         var markers: [String] = []
+        if isFrontmost {
+            markers.append("frontmost")
+        }
         if isRunning {
             markers.append("running")
         }
@@ -49,6 +53,13 @@ enum AppDiscovery {
     private static let lastUsedDateRankingAttribute = "kMDItemLastUsedDate_Ranking"
     private static let useCountAttribute = "kMDItemUseCount"
     private static let maxRecentNonRunningApps = 10
+    private static let fixtureListBundleIdentifier = "dev.opencodex.opencomputeruse.fixture"
+    private static let standardApplicationSearchRoots: [URL] = [
+        URL(fileURLWithPath: "/Applications", isDirectory: true),
+        URL(fileURLWithPath: "/System/Applications", isDirectory: true),
+        URL(fileURLWithPath: "/System/Library/CoreServices", isDirectory: true),
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true),
+    ]
 
     static let usageDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -60,8 +71,9 @@ enum AppDiscovery {
 
     static func listCatalog() -> [ListedAppDescriptor] {
         let running = userFacingRunningApps()
+        let frontmostBundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier?.lowercased()
         let runningByBundle = running.reduce(into: [String: RunningAppDescriptor]()) { result, descriptor in
-            guard let bundleIdentifier = descriptor.bundleIdentifier, !bundleIdentifier.isEmpty else {
+            guard let bundleIdentifier = listedBundleIdentifier(for: descriptor) else {
                 return
             }
 
@@ -80,13 +92,14 @@ enum AppDiscovery {
                 name: runningDescriptor?.name ?? record.name,
                 bundleIdentifier: record.bundleIdentifier,
                 isRunning: runningDescriptor != nil,
+                isFrontmost: key == frontmostBundleIdentifier,
                 lastUsed: record.lastUsed,
                 uses: record.uses
             )
         }
 
         for descriptor in running {
-            guard let bundleIdentifier = descriptor.bundleIdentifier, !bundleIdentifier.isEmpty else {
+            guard let bundleIdentifier = listedBundleIdentifier(for: descriptor) else {
                 continue
             }
 
@@ -96,6 +109,7 @@ enum AppDiscovery {
                 name: descriptor.name,
                 bundleIdentifier: bundleIdentifier,
                 isRunning: true,
+                isFrontmost: key == frontmostBundleIdentifier,
                 lastUsed: existing?.lastUsed,
                 uses: existing?.uses
             )
@@ -152,6 +166,12 @@ enum AppDiscovery {
         throw ComputerUseError.appNotFound(normalizedQuery)
     }
 
+    struct ResolutionCandidate {
+        let name: String
+        let executableName: String?
+        let isRegularApp: Bool
+    }
+
     private static func resolvedRunningApp(in descriptors: [RunningAppDescriptor], matching query: String) -> RunningAppDescriptor? {
         if isBundleIdentifierQuery(query) {
             return descriptors.first(where: { descriptor in
@@ -159,14 +179,56 @@ enum AppDiscovery {
             })
         }
 
-        return descriptors.first(where: { descriptor in
-            guard !AppSafetyPolicy.isBlocked(bundleIdentifier: descriptor.bundleIdentifier) else {
-                return false
+        let allowed = descriptors.filter { descriptor in
+            !AppSafetyPolicy.isBlocked(bundleIdentifier: descriptor.bundleIdentifier)
+        }
+        let candidates = allowed.map { descriptor in
+            ResolutionCandidate(
+                name: descriptor.name,
+                executableName: descriptor.runningApplication.executableURL?.deletingPathExtension().lastPathComponent,
+                isRegularApp: descriptor.runningApplication.activationPolicy == .regular
+            )
+        }
+
+        guard let index = bestResolutionIndex(of: candidates, matching: query) else {
+            return nil
+        }
+
+        return allowed[index]
+    }
+
+    static func bestResolutionIndex(of candidates: [ResolutionCandidate], matching query: String) -> Int? {
+        var best: (rank: Int, index: Int)?
+
+        for (index, candidate) in candidates.enumerated() {
+            let rank: Int?
+            if candidate.isRegularApp, candidate.name.caseInsensitiveCompare(query) == .orderedSame {
+                rank = 0
+            } else if candidate.isRegularApp, candidate.executableName?.caseInsensitiveCompare(query) == .orderedSame {
+                rank = 1
+            } else if candidate.name.caseInsensitiveCompare(query) == .orderedSame {
+                rank = 2
+            } else if candidate.executableName?.caseInsensitiveCompare(query) == .orderedSame {
+                rank = 3
+            } else {
+                rank = nil
             }
 
-            return descriptor.name.caseInsensitiveCompare(query) == .orderedSame
-                || descriptor.runningApplication.executableURL?.deletingPathExtension().lastPathComponent.caseInsensitiveCompare(query) == .orderedSame
-        })
+            guard let rank else {
+                continue
+            }
+
+            if let current = best, rank >= current.rank {
+                continue
+            }
+
+            best = (rank, index)
+            if rank == 0 {
+                break
+            }
+        }
+
+        return best?.index
     }
 
     private static func userFacingRunningApps() -> [RunningAppDescriptor] {
@@ -178,7 +240,7 @@ enum AppDiscovery {
                 continue
             }
 
-            guard let bundleIdentifier = descriptor.bundleIdentifier, !bundleIdentifier.isEmpty else {
+            guard let bundleIdentifier = listedBundleIdentifier(for: descriptor) else {
                 continue
             }
 
@@ -193,7 +255,23 @@ enum AppDiscovery {
         return descriptors
     }
 
-    private static func compareListedApps(_ lhs: ListedAppDescriptor, _ rhs: ListedAppDescriptor) -> Bool {
+    private static func listedBundleIdentifier(for descriptor: RunningAppDescriptor) -> String? {
+        if let bundleIdentifier = descriptor.bundleIdentifier, !bundleIdentifier.isEmpty {
+            return bundleIdentifier
+        }
+
+        guard descriptor.name == FixtureBridge.appName else {
+            return nil
+        }
+
+        return fixtureListBundleIdentifier
+    }
+
+    static func compareListedApps(_ lhs: ListedAppDescriptor, _ rhs: ListedAppDescriptor) -> Bool {
+        if lhs.isFrontmost != rhs.isFrontmost {
+            return lhs.isFrontmost && !rhs.isFrontmost
+        }
+
         if lhs.isRunning != rhs.isRunning {
             return lhs.isRunning && !rhs.isRunning
         }
@@ -227,21 +305,91 @@ enum AppDiscovery {
             }
 
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: query) {
-                try NSWorkspace.shared.launchApplication(at: appURL, options: [], configuration: [:])
+                try openApplication(at: appURL)
             }
             return
         }
 
-        guard let fullPath = NSWorkspace.shared.fullPath(forApplication: query) else {
+        guard let appURL = applicationURL(named: query) else {
             return
         }
 
-        let appURL = URL(fileURLWithPath: fullPath)
         if AppSafetyPolicy.isBlocked(bundleIdentifier: Bundle(url: appURL)?.bundleIdentifier) {
             return
         }
 
-        try NSWorkspace.shared.launchApplication(at: appURL, options: [], configuration: [:])
+        try openApplication(at: appURL)
+    }
+
+    private static func applicationURL(named query: String) -> URL? {
+        let targetName = stripAppSuffix(from: query).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetName.isEmpty else {
+            return nil
+        }
+
+        let fileManager = FileManager.default
+        let resourceKeys: [URLResourceKey] = [.isApplicationKey, .isDirectoryKey, .nameKey]
+        var visitedPaths: Set<String> = []
+
+        for root in standardApplicationSearchRoots where fileManager.fileExists(atPath: root.path) {
+            guard let enumerator = fileManager.enumerator(
+                at: root,
+                includingPropertiesForKeys: resourceKeys,
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            ) else {
+                continue
+            }
+
+            for case let candidateURL as URL in enumerator {
+                guard candidateURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame else {
+                    continue
+                }
+
+                let normalizedPath = candidateURL.standardizedFileURL.path.lowercased()
+                guard visitedPaths.insert(normalizedPath).inserted else {
+                    continue
+                }
+
+                let candidateName = stripAppSuffix(from: candidateURL.lastPathComponent)
+                if candidateName.caseInsensitiveCompare(targetName) == .orderedSame {
+                    return candidateURL
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func openApplication(at appURL: URL) throws {
+        let configuration = NSWorkspace.OpenConfiguration()
+        let semaphore = DispatchSemaphore(value: 0)
+        let errorBox = LaunchErrorBox()
+
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
+            errorBox.error = error
+            semaphore.signal()
+        }
+
+        waitForSignal(semaphore)
+
+        if let launchError = errorBox.error {
+            throw launchError
+        }
+    }
+
+    private static func waitForSignal(_ semaphore: DispatchSemaphore) {
+        if Thread.isMainThread {
+            while semaphore.wait(timeout: .now()) == .timedOut {
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+            }
+            return
+        }
+
+        semaphore.wait()
+    }
+
+    private final class LaunchErrorBox: @unchecked Sendable {
+        var error: Error?
     }
 
     private static func recentUsageCutoff(referenceDate: Date = Date()) -> Date {
@@ -263,7 +411,11 @@ enum AppDiscovery {
     }
 
     private static func isUserFacingListApp(_ app: NSRunningApplication) -> Bool {
-        app.activationPolicy == .regular
+        if appName(app) == FixtureBridge.appName {
+            return true
+        }
+
+        return app.activationPolicy == .regular
     }
 
     private static func bundleDisplayName(_ bundle: Bundle?) -> String? {
@@ -399,9 +551,8 @@ enum AppDiscovery {
     }
 }
 
-private enum AppSafetyPolicy {
+enum AppSafetyPolicy {
     private static let blockedBundleIdentifiers: Set<String> = [
-        "com.apple.ScreenContinuity",
         "com.1password.1password",
         "com.1password.safari",
         "com.bitwarden.desktop",
@@ -410,20 +561,6 @@ private enum AppSafetyPolicy {
         "com.nordsec.nordpass",
         "me.proton.pass.electron",
         "me.proton.pass.catalyst",
-        "com.apple.Terminal",
-        "com.googlecode.iterm2",
-        "dev.warp.Warp-Stable",
-        "net.kovidgoyal.kitty",
-        "com.github.wez.wezterm",
-        "com.mitchellh.ghostty",
-        "com.raphaelamorim.rio",
-        "dev.commandline.waveterm",
-        "com.google.Chrome",
-        "com.openai.atlas.alpha",
-        "com.openai.atlas.beta",
-        "com.apple.UserNotificationCenter",
-        "com.apple.LocalAuthenticationRemoteService",
-        "com.apple.SecurityAgent",
     ]
 
     static func isBlocked(bundleIdentifier: String?) -> Bool {

@@ -5,15 +5,36 @@ import OpenComputerUseKit
 
 @main
 enum OpenComputerUseMain {
-    static func main() throws {
-        let arguments = Array(CommandLine.arguments.dropFirst())
-        let command: OpenComputerUseCLICommand
-
+    @MainActor
+    static func main() {
         do {
-            command = try parseOpenComputerUseCLI(arguments: arguments)
+            try run()
         } catch let error as OpenComputerUseCLIError {
             writeToStandardError(error.errorDescription ?? error.message)
             exit(EXIT_FAILURE)
+        } catch let error as ComputerUseError {
+            writeToStandardError(error.errorDescription ?? String(describing: error))
+            exit(EXIT_FAILURE)
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+            writeToStandardError(message)
+            exit(EXIT_FAILURE)
+        }
+    }
+
+    @MainActor
+    private static func run() throws {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+
+        if MacOSAppAgentProxy.isAgentInvocation(arguments: arguments) {
+            try MacOSAppAgentProxy.runAgent(arguments: arguments)
+            return
+        }
+
+        let command = try parseOpenComputerUseCLI(arguments: arguments)
+
+        if MacOSAppAgentProxy.shouldProxy(command: command) {
+            exit(try MacOSAppAgentProxy.runProxy(command: command, arguments: arguments))
         }
 
         switch command {
@@ -36,10 +57,20 @@ enum OpenComputerUseMain {
         case .listApps:
             let service = ComputerUseService()
             print(service.listApps().primaryText ?? "")
-        case let .snapshot(app):
+        case let .snapshot(app, textLimit, treeLimits):
             let service = ComputerUseService()
-            print(try service.getAppState(app: app).primaryText ?? "")
+            print(try service.getAppState(app: app, textLimit: textLimit, treeLimits: treeLimits).primaryText ?? "")
+        case let .call(invocation):
+            if VisualCursorSupport.isEnabled {
+                _ = NSApplication.shared.setActivationPolicy(.accessory)
+            }
+            let output = try runOpenComputerUseCall(invocation)
+            print(try output.jsonText())
+            if output.hasToolError {
+                exit(EXIT_FAILURE)
+            }
         case .turnEnded:
+            postOpenComputerUseTurnEndedNotification()
             print("turn-ended acknowledged")
         case let .help(command):
             print(openComputerUseHelpText(command: command))

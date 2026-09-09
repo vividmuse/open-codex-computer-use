@@ -32,6 +32,122 @@ func visualCursorEnabled(environment: [String: String]) -> Bool {
     return !["0", "false", "no", "off"].contains(rawValue)
 }
 
+func defaultVisualCursorInitialTipPosition(
+    windowOrigin: CGPoint = .zero,
+    tipAnchor: CGPoint = SoftwareCursorGlyphMetrics.tipAnchor
+) -> CGPoint {
+    return CGPoint(
+        x: windowOrigin.x + tipAnchor.x,
+        y: windowOrigin.y + tipAnchor.y
+    )
+}
+
+func visualCursorRenderBaseHeading(
+    artworkNeutralHeading: CGFloat = SoftwareCursorGlyphMetrics.targetNeutralHeading
+) -> CGFloat {
+    artworkNeutralHeading
+}
+
+func visualCursorAppKitForwardHeading(
+    renderRotation: CGFloat,
+    artworkNeutralHeading: CGFloat = SoftwareCursorGlyphMetrics.targetNeutralHeading
+) -> CGFloat {
+    -artworkNeutralHeading - renderRotation
+}
+
+func visualCursorRuntimeRenderYAxisMultiplier() -> CGFloat {
+    // Window placement uses AppKit global coordinates, but glyph render state is
+    // still interpreted as CursorMotion's y-down screen state before drawing.
+    -1
+}
+
+func visualCursorScreenStateVelocity(
+    fromRuntimeVelocity velocity: CGVector,
+    yAxisMultiplier: CGFloat
+) -> CGVector {
+    CGVector(dx: velocity.dx, dy: velocity.dy * yAxisMultiplier)
+}
+
+func visualCursorPostInteractionIdleTimeout() -> TimeInterval {
+    30
+}
+
+func visualCursorIdleRotationAmplitude() -> CGFloat {
+    0.09
+}
+
+public struct VisualCursorObservationPoint: Codable, Sendable {
+    public let x: Double
+    public let y: Double
+
+    public init(point: CGPoint) {
+        x = point.x
+        y = point.y
+    }
+}
+
+public struct VisualCursorObservationSnapshot: Codable, Sendable {
+    public let phase: String
+    public let tipPosition: VisualCursorObservationPoint?
+    public let restingTipPosition: VisualCursorObservationPoint?
+    public let rotation: Double?
+    public let timestamp: Double
+
+    public init(
+        phase: String,
+        tipPosition: CGPoint?,
+        restingTipPosition: CGPoint?,
+        rotation: CGFloat?,
+        timestamp: CFTimeInterval
+    ) {
+        self.phase = phase
+        self.tipPosition = tipPosition.map(VisualCursorObservationPoint.init(point:))
+        self.restingTipPosition = restingTipPosition.map(VisualCursorObservationPoint.init(point:))
+        self.rotation = rotation.map(Double.init)
+        self.timestamp = timestamp
+    }
+}
+
+struct VisualCursorIdlePose {
+    let tipPosition: CGPoint
+    let angleOffset: CGFloat
+}
+
+func visualCursorIdlePose(restingTipPosition: CGPoint, phase: CGFloat) -> VisualCursorIdlePose {
+    VisualCursorIdlePose(
+        tipPosition: restingTipPosition,
+        angleOffset: sin(phase * 0.8) * visualCursorIdleRotationAmplitude()
+    )
+}
+
+public func visualCursorObservationFileURL(environment: [String: String]) -> URL? {
+    guard
+        let rawPath = environment["OPEN_COMPUTER_USE_VISUAL_CURSOR_OBSERVATION_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+        !rawPath.isEmpty
+    else {
+        return nil
+    }
+
+    return URL(fileURLWithPath: rawPath)
+}
+
+public let openComputerUseTurnEndedNotificationName = Notification.Name("com.ifuryst.opencomputeruse.turn-ended")
+
+public func postOpenComputerUseTurnEndedNotification() {
+    DistributedNotificationCenter.default().postNotificationName(
+        openComputerUseTurnEndedNotificationName,
+        object: nil,
+        userInfo: nil,
+        deliverImmediately: true
+    )
+}
+
+@MainActor
+public func resetOpenComputerUseVisualCursor() {
+    SoftwareCursorOverlay.reset()
+}
+
 struct CursorTargetWindow: Equatable, Sendable {
     let windowID: CGWindowID
     let layer: Int
@@ -56,215 +172,21 @@ struct CursorWindowGeometry {
     }
 }
 
-private struct ProcessedCursorImage {
-    let image: NSImage
-    let tipAnchor: CGPoint
-}
-
 private struct CursorArtwork {
-    let image: NSImage?
     let geometry: CursorWindowGeometry
-    let drawRect: CGRect
-    let shadowBlur: CGFloat
-    let shadowOffset: CGSize
-    let shadowColor: NSColor
-    let vectorScale: CGFloat
-
-    static let active: CursorArtwork = loadOfficialSoftwareCursor() ?? fallback
-
-    private static let fallback = CursorArtwork(
-        image: nil,
+    static let active = CursorArtwork(
         geometry: CursorWindowGeometry(
-            windowSize: CGSize(width: 56, height: 56),
-            tipAnchor: CGPoint(x: 10, y: 43)
+            windowSize: SoftwareCursorGlyphMetrics.windowSize,
+            tipAnchor: SoftwareCursorGlyphMetrics.tipAnchor
         ),
-        drawRect: CGRect(x: 0, y: 0, width: 56, height: 56),
-        shadowBlur: 12,
-        shadowOffset: CGSize(width: 0, height: -2),
-        shadowColor: NSColor.black.withAlphaComponent(0.24),
-        vectorScale: 0.40
     )
-
-    private static func loadOfficialSoftwareCursor() -> CursorArtwork? {
-        for bundle in officialCursorBundles() {
-            guard let image = bundle.image(forResource: NSImage.Name("SoftwareCursor")),
-                  let processed = processOfficialCursor(image)
-            else {
-                continue
-            }
-
-            let targetHeight: CGFloat = 26
-            let scale = targetHeight / processed.image.size.height
-            let imageSize = CGSize(
-                width: processed.image.size.width * scale,
-                height: processed.image.size.height * scale
-            )
-            let margin = NSEdgeInsets(top: 4, left: 3, bottom: 7, right: 5)
-            let tipAnchor = CGPoint(
-                x: margin.left + (processed.tipAnchor.x * scale),
-                y: margin.bottom + (processed.tipAnchor.y * scale)
-            )
-
-            return CursorArtwork(
-                image: processed.image,
-                geometry: CursorWindowGeometry(
-                    windowSize: CGSize(
-                        width: imageSize.width + margin.left + margin.right,
-                        height: imageSize.height + margin.top + margin.bottom
-                    ),
-                    tipAnchor: tipAnchor
-                ),
-                drawRect: CGRect(x: margin.left, y: margin.bottom, width: imageSize.width, height: imageSize.height),
-                shadowBlur: 17,
-                shadowOffset: CGSize(width: 0, height: -3),
-                shadowColor: NSColor.black.withAlphaComponent(0.26),
-                vectorScale: 0
-            )
-        }
-
-        return nil
-    }
-
-    private static func officialCursorBundles() -> [Bundle] {
-        let root = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".codex/plugins/cache/openai-bundled/computer-use", isDirectory: true)
-
-        guard let versions = try? FileManager.default.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return []
-        }
-
-        let sortedVersions = versions.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedDescending }
-
-        let bundlePaths = sortedVersions.flatMap { versionURL in
-            [
-                versionURL.appendingPathComponent("Codex Computer Use.app/Contents/Resources/Package_ComputerUse.bundle", isDirectory: true),
-                versionURL.appendingPathComponent("Codex Computer Use.app/Contents/Resources/Package_SlimCore.bundle", isDirectory: true),
-            ]
-        }
-
-        return bundlePaths.compactMap { Bundle(path: $0.path) }
-    }
-
-    private static func processOfficialCursor(_ image: NSImage) -> ProcessedCursorImage? {
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return nil
-        }
-
-        let bitmap = NSBitmapImageRep(cgImage: cgImage)
-        let width = bitmap.pixelsWide
-        let height = bitmap.pixelsHigh
-        guard width > 0, height > 0 else {
-            return nil
-        }
-
-        let highlightThreshold: CGFloat = 0.83
-        let tint = NSColor(calibratedWhite: 0.92, alpha: 1).usingColorSpace(.deviceRGB) ?? NSColor.white
-        let tintRed = UInt8(tint.redComponent * 255)
-        let tintGreen = UInt8(tint.greenComponent * 255)
-        let tintBlue = UInt8(tint.blueComponent * 255)
-
-        var minX = width
-        var maxX = 0
-        var minY = height
-        var maxY = 0
-        var tipPixel = CGPoint.zero
-        var tipScore = -CGFloat.greatestFiniteMagnitude
-
-        for y in 0..<height {
-            for x in 0..<width {
-                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
-                    continue
-                }
-
-                let alpha = color.alphaComponent
-                let brightness = max(color.redComponent, color.greenComponent, color.blueComponent)
-                guard alpha > 0.08, brightness > highlightThreshold else {
-                    continue
-                }
-
-                minX = Swift.min(minX, x)
-                maxX = Swift.max(maxX, x)
-                minY = Swift.min(minY, y)
-                maxY = Swift.max(maxY, y)
-
-                let score = (CGFloat(y) * 3) - CGFloat(x)
-                if score > tipScore {
-                    tipScore = score
-                    tipPixel = CGPoint(x: x, y: y)
-                }
-            }
-        }
-
-        guard minX <= maxX, minY <= maxY else {
-            return nil
-        }
-
-        let padding = 3
-        minX = Swift.max(0, minX - padding)
-        minY = Swift.max(0, minY - padding)
-        maxX = Swift.min(width - 1, maxX + padding)
-        maxY = Swift.min(height - 1, maxY + padding)
-
-        let croppedWidth = maxX - minX + 1
-        let croppedHeight = maxY - minY + 1
-
-        guard let output = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: croppedWidth,
-            pixelsHigh: croppedHeight,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        ), let bitmapData = output.bitmapData else {
-            return nil
-        }
-
-        for y in minY...maxY {
-            for x in minX...maxX {
-                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
-                    continue
-                }
-
-                let alpha = color.alphaComponent
-                let brightness = max(color.redComponent, color.greenComponent, color.blueComponent)
-                let whiteness = CGFloat.clamped((brightness - highlightThreshold) / (1 - highlightThreshold), lower: 0, upper: 1)
-                let resultAlpha = UInt8((alpha * whiteness) * 255)
-
-                let localX = x - minX
-                let localY = y - minY
-                let offset = (localY * output.bytesPerRow) + (localX * 4)
-                bitmapData[offset] = tintRed
-                bitmapData[offset + 1] = tintGreen
-                bitmapData[offset + 2] = tintBlue
-                bitmapData[offset + 3] = resultAlpha
-            }
-        }
-
-        let processed = NSImage(size: CGSize(width: croppedWidth, height: croppedHeight))
-        processed.addRepresentation(output)
-
-        return ProcessedCursorImage(
-            image: processed,
-            tipAnchor: CGPoint(
-                x: tipPixel.x - CGFloat(minX),
-                y: tipPixel.y - CGFloat(minY)
-            )
-        )
-    }
 }
 
 @MainActor
 enum SoftwareCursorOverlay {
     private static let artwork = CursorArtwork.active
-    private static let baseHeading = 3 * CGFloat.pi / 4
+    private static let renderBaseHeading = visualCursorRenderBaseHeading()
+    private static let renderYAxisMultiplier = visualCursorRuntimeRenderYAxisMultiplier()
     private static var panel: CursorPanel?
     private static var cursorView: SoftwareCursorView?
     private static var restingTipPosition: CGPoint?
@@ -274,6 +196,7 @@ enum SoftwareCursorOverlay {
     private static var idleTimer: Timer?
     private static var hideTimer: Timer?
     private static var idlePhase: CGFloat = 0
+    private static var observationPhase = "hidden"
 
     static func moveCursor(to targetPoint: CGPoint, in targetWindow: CursorTargetWindow?) {
         guard VisualCursorSupport.isEnabled, canPresentOverlay else {
@@ -286,18 +209,25 @@ enum SoftwareCursorOverlay {
         configureOrdering(relativeTo: targetWindow)
 
         let constrainedTarget = clampTipPosition(targetPoint)
-        let startPoint = displayedTipPosition ?? defaultAppearancePoint(for: constrainedTarget)
+        let isFreshStart = displayedTipPosition == nil
+        let startPoint = displayedTipPosition ?? defaultInitialTipPosition()
         let now = CACurrentMediaTime()
 
+        observationPhase = "moving"
         panel?.alphaValue = 1
-        seedVisualDynamicsIfNeeded(at: startPoint, time: now)
-        placeCursor(
-            using: advanceVisualDynamics(
-                toward: startPoint,
-                at: now
-            ),
-            clickProgress: 0
-        )
+        if isFreshStart {
+            visualDynamicsState = CursorVisualDynamicsAnimator.state(at: startPoint, time: CGFloat(now))
+            placeCursor(using: initialRenderState(at: startPoint), clickProgress: 0)
+        } else {
+            seedVisualDynamicsIfNeeded(at: startPoint, time: now)
+            placeCursor(
+                using: advanceVisualDynamics(
+                    toward: startPoint,
+                    at: now
+                ),
+                clickProgress: 0
+            )
+        }
 
         if distanceBetween(startPoint, constrainedTarget) > 2 {
             animateMove(from: startPoint, to: constrainedTarget, relativeTo: targetWindow)
@@ -314,9 +244,10 @@ enum SoftwareCursorOverlay {
         let now = CACurrentMediaTime()
         seedVisualDynamicsIfNeeded(at: constrainedTarget, time: now)
         restingTipPosition = constrainedTarget
+        observationPhase = "pulse"
         animateClickPulse(at: constrainedTarget, clickCount: max(clickCount, 1), mouseButton: mouseButton)
         startIdleAnimation()
-        scheduleHide(after: 0.55)
+        scheduleHide(after: visualCursorPostInteractionIdleTimeout())
     }
 
     static func settle(at targetPoint: CGPoint, in targetWindow: CursorTargetWindow?) {
@@ -327,6 +258,7 @@ enum SoftwareCursorOverlay {
         configureOrdering(relativeTo: targetWindow)
         let constrainedTarget = clampTipPosition(targetPoint)
         restingTipPosition = constrainedTarget
+        observationPhase = "settling"
         placeCursor(
             using: advanceVisualDynamics(
                 toward: constrainedTarget,
@@ -335,7 +267,7 @@ enum SoftwareCursorOverlay {
             clickProgress: 0
         )
         startIdleAnimation()
-        scheduleHide(after: 0.45)
+        scheduleHide(after: visualCursorPostInteractionIdleTimeout())
     }
 
     static func reset() {
@@ -345,6 +277,8 @@ enum SoftwareCursorOverlay {
         restingTipPosition = nil
         activeTargetWindow = nil
         visualDynamicsState = nil
+        observationPhase = "hidden"
+        writeObservationSnapshot(tipPosition: nil, rotation: nil)
         panel?.orderOut(nil)
     }
 
@@ -371,7 +305,7 @@ enum SoftwareCursorOverlay {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.animationBehavior = .none
 
-        let view = SoftwareCursorView(frame: CGRect(origin: .zero, size: artwork.geometry.windowSize), artwork: artwork)
+        let view = SoftwareCursorView(frame: CGRect(origin: .zero, size: artwork.geometry.windowSize))
         panel.contentView = view
 
         self.panel = panel
@@ -379,6 +313,10 @@ enum SoftwareCursorOverlay {
     }
 
     private static func configureOrdering(relativeTo targetWindow: CursorTargetWindow?) {
+        configureOrdering(relativeTo: targetWindow, forceReorder: false)
+    }
+
+    private static func configureOrdering(relativeTo targetWindow: CursorTargetWindow?, forceReorder: Bool) {
         guard let panel else {
             return
         }
@@ -392,7 +330,12 @@ enum SoftwareCursorOverlay {
             panel.level = desiredLevel
         }
 
-        if activeTargetWindow != effectiveTargetWindow || panel.isVisible == false {
+        if shouldReorderCursorPanel(
+            activeTargetWindow: activeTargetWindow,
+            effectiveTargetWindow: effectiveTargetWindow,
+            panelIsVisible: panel.isVisible,
+            forceReorder: forceReorder
+        ) {
             if let effectiveTargetWindow {
                 panel.order(.above, relativeTo: Int(effectiveTargetWindow.windowID))
             } else {
@@ -405,9 +348,9 @@ enum SoftwareCursorOverlay {
     private static func animateMove(from start: CGPoint, to end: CGPoint, relativeTo targetWindow: CursorTargetWindow?) {
         let candidate = bestMotionCandidate(from: start, to: end, relativeTo: targetWindow)
         let path = candidate.path
-        // Binary-backed geometry and spring shape are used directly, but the final
-        // wall-clock duration is still calibrated locally because the official
-        // transaction-level duration mapping has not been fully recovered yet.
+        // Use the recovered official progress spring timing instead of the older
+        // distance-compressed local duration, otherwise medium and long moves feel
+        // noticeably faster than the bundled app.
         let duration = OfficialCursorMotionModel.calibratedTravelDuration(
             distance: distanceBetween(start, end),
             measurement: candidate.measurement
@@ -523,7 +466,7 @@ enum SoftwareCursorOverlay {
     }
 
     private static func forwardVector(renderRotation: CGFloat) -> CGVector {
-        let angle = baseHeading + renderRotation
+        let angle = visualCursorAppKitForwardHeading(renderRotation: renderRotation)
         return CGVector(dx: cos(angle), dy: sin(angle))
     }
 
@@ -589,7 +532,12 @@ enum SoftwareCursorOverlay {
     }
 
     private static func refreshActiveOrderingIfNeeded() {
-        guard let activeTargetWindow, !isWindowPresent(activeTargetWindow.windowID) else {
+        guard let activeTargetWindow else {
+            return
+        }
+
+        if isWindowPresent(activeTargetWindow.windowID) {
+            configureOrdering(relativeTo: activeTargetWindow, forceReorder: true)
             return
         }
 
@@ -642,6 +590,7 @@ enum SoftwareCursorOverlay {
             return
         }
 
+        observationPhase = "idle"
         idlePhase = 0
         let timer = Timer(timeInterval: 1 / 60, repeats: true) { _ in
             MainActor.assumeIsolated {
@@ -651,17 +600,17 @@ enum SoftwareCursorOverlay {
 
                 refreshActiveOrderingIfNeeded()
 
+                observationPhase = "idle"
                 idlePhase += 0.05
-                let targetTipPosition = CGPoint(
-                    x: restingTipPosition.x + (sin(idlePhase) * 1.6),
-                    y: restingTipPosition.y + (cos(idlePhase * 0.47) * 0.7)
+                let idlePose = visualCursorIdlePose(
+                    restingTipPosition: restingTipPosition,
+                    phase: idlePhase
                 )
-                let idleAngleOffset = sin(idlePhase * 0.8) * 0.03
 
                 placeCursor(
                     using: advanceVisualDynamics(
-                        toward: targetTipPosition,
-                        idleAngleOffset: idleAngleOffset,
+                        toward: idlePose.tipPosition,
+                        idleAngleOffset: idlePose.angleOffset,
                         at: CACurrentMediaTime()
                     ),
                     clickProgress: 0
@@ -722,16 +671,27 @@ enum SoftwareCursorOverlay {
                 restingTipPosition = nil
                 activeTargetWindow = nil
                 visualDynamicsState = nil
+                observationPhase = "hidden"
+                writeObservationSnapshot(tipPosition: nil, rotation: nil)
             }
         }
     }
 
-    private static func defaultAppearancePoint(for targetPoint: CGPoint) -> CGPoint {
-        clampTipPosition(
-            CGPoint(
-                x: targetPoint.x + 72,
-                y: targetPoint.y - 54
-            )
+    private static func defaultInitialTipPosition() -> CGPoint {
+        defaultVisualCursorInitialTipPosition(
+            windowOrigin: .zero,
+            tipAnchor: artwork.geometry.tipAnchor
+        )
+    }
+
+    private static func initialRenderState(at tipPosition: CGPoint) -> CursorVisualRenderState {
+        CursorVisualRenderState(
+            tipPosition: tipPosition,
+            rotation: 0,
+            cursorBodyOffset: CGVector(dx: 0, dy: 0),
+            fogOffset: CGVector(dx: 0, dy: 0),
+            fogOpacity: CursorVisualDynamicsConfiguration.officialInspired.fogOpacityBase,
+            fogScale: 1
         )
     }
 
@@ -759,7 +719,8 @@ enum SoftwareCursorOverlay {
             targetTipPosition: clampedTarget,
             targetTime: CGFloat(time),
             idleAngleOffset: idleAngleOffset,
-            baseHeading: baseHeading
+            baseHeading: renderBaseHeading,
+            renderYAxisMultiplier: renderYAxisMultiplier
         )
         visualDynamicsState = result.state
         return result.renderState
@@ -779,6 +740,35 @@ enum SoftwareCursorOverlay {
         cursorView.clickProgress = clickProgress
         cursorView.needsDisplay = true
         displayedTipPosition = renderState.tipPosition
+        writeObservationSnapshot(
+            tipPosition: renderState.tipPosition,
+            rotation: renderState.rotation
+        )
+    }
+
+    private static func writeObservationSnapshot(tipPosition: CGPoint?, rotation: CGFloat?) {
+        guard
+            let url = visualCursorObservationFileURL(environment: ProcessInfo.processInfo.environment)
+        else {
+            return
+        }
+
+        let snapshot = VisualCursorObservationSnapshot(
+            phase: observationPhase,
+            tipPosition: tipPosition,
+            restingTipPosition: restingTipPosition,
+            rotation: rotation,
+            timestamp: CACurrentMediaTime()
+        )
+
+        do {
+            let directory = url.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(snapshot)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // Observation is debug-only and must not affect tool execution.
+        }
     }
 
     private static func clampTipPosition(_ tipPosition: CGPoint) -> CGPoint {
@@ -818,14 +808,21 @@ enum SoftwareCursorOverlay {
     }
 }
 
+func shouldReorderCursorPanel(
+    activeTargetWindow: CursorTargetWindow?,
+    effectiveTargetWindow: CursorTargetWindow?,
+    panelIsVisible: Bool,
+    forceReorder: Bool
+) -> Bool {
+    forceReorder || activeTargetWindow != effectiveTargetWindow || panelIsVisible == false
+}
+
 private final class CursorPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
 
 private final class SoftwareCursorView: NSView {
-    private let artwork: CursorArtwork
-
     var rotation: CGFloat = 0
     var cursorBodyOffset: CGVector = CGVector(dx: 0, dy: 0)
     var fogOffset: CGVector = CGVector(dx: 0, dy: 0)
@@ -833,8 +830,7 @@ private final class SoftwareCursorView: NSView {
     var fogScale: CGFloat = 1
     var clickProgress: CGFloat = 0
 
-    init(frame frameRect: NSRect, artwork: CursorArtwork) {
-        self.artwork = artwork
+    override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
     }
@@ -854,113 +850,21 @@ private final class SoftwareCursorView: NSView {
         NSColor.clear.setFill()
         dirtyRect.fill()
 
-        let motionCompression = min(hypot(cursorBodyOffset.dx, cursorBodyOffset.dy) * 0.01, 0.02)
-        let compression = (clickProgress * 0.05) + motionCompression
-        let scaleX = 1 - compression
-        let scaleY = 1 + (compression * 0.24)
+        guard let context = NSGraphicsContext.current?.cgContext else {
+            return
+        }
 
-        let anchor = artwork.geometry.tipAnchor
-        let context = NSGraphicsContext.current?.cgContext
-        let fogRect = CGRect(
-            x: anchor.x - (12 * fogScale) + fogOffset.dx,
-            y: anchor.y - (51 * fogScale) + fogOffset.dy,
-            width: 24 * fogScale,
-            height: 8 * fogScale
+        SoftwareCursorGlyphRenderer.draw(
+            in: bounds,
+            context: context,
+            state: SoftwareCursorGlyphRenderState(
+                rotation: rotation,
+                cursorBodyOffset: cursorBodyOffset,
+                fogOffset: fogOffset,
+                fogOpacity: fogOpacity,
+                fogScale: fogScale,
+                clickProgress: clickProgress
+            )
         )
-        let fogOval = NSBezierPath(ovalIn: fogRect)
-        NSGraphicsContext.saveGraphicsState()
-        let ovalShadow = NSShadow()
-        ovalShadow.shadowBlurRadius = (10 * fogScale) + (clickProgress * 2)
-        ovalShadow.shadowOffset = CGSize(width: 0, height: -1)
-        ovalShadow.shadowColor = NSColor.white.withAlphaComponent(fogOpacity * 0.55)
-        ovalShadow.set()
-        NSColor.white.withAlphaComponent(fogOpacity).setFill()
-        fogOval.fill()
-        NSGraphicsContext.restoreGraphicsState()
-
-        context?.saveGState()
-        context?.translateBy(x: cursorBodyOffset.dx, y: cursorBodyOffset.dy)
-        context?.translateBy(x: anchor.x, y: anchor.y)
-        context?.rotate(by: rotation)
-        context?.scaleBy(x: scaleX, y: scaleY)
-        context?.translateBy(x: -anchor.x, y: -anchor.y)
-
-        if let image = artwork.image {
-            NSGraphicsContext.saveGraphicsState()
-            let shadow = NSShadow()
-            shadow.shadowBlurRadius = artwork.shadowBlur + (clickProgress * 4)
-            shadow.shadowOffset = artwork.shadowOffset
-            shadow.shadowColor = artwork.shadowColor
-            shadow.set()
-            image.draw(in: artwork.drawRect, from: .zero, operation: .sourceOver, fraction: 1)
-            NSGraphicsContext.restoreGraphicsState()
-        } else {
-            let shadowPath = cursorPath(anchor: anchor, scale: artwork.vectorScale, xOffset: 2, yOffset: -2)
-            NSGraphicsContext.saveGraphicsState()
-            let shadow = NSShadow()
-            shadow.shadowBlurRadius = artwork.shadowBlur + (clickProgress * 5)
-            shadow.shadowOffset = artwork.shadowOffset
-            shadow.shadowColor = artwork.shadowColor
-            shadow.set()
-            NSColor.black.withAlphaComponent(0.22).setFill()
-            shadowPath.fill()
-            NSGraphicsContext.restoreGraphicsState()
-
-            let path = cursorPath(anchor: anchor, scale: artwork.vectorScale, xOffset: 0, yOffset: 0)
-            let gradient = NSGradient(colors: [
-                NSColor(calibratedWhite: 0.97, alpha: 0.92),
-                NSColor(calibratedWhite: 0.84, alpha: 0.90),
-            ])!
-            gradient.draw(in: path, angle: -78)
-
-            NSColor(calibratedWhite: 1, alpha: 0.85).setStroke()
-            path.lineWidth = 1.0
-            path.lineJoinStyle = .round
-            path.lineCapStyle = .round
-            path.stroke()
-        }
-
-        context?.restoreGState()
-
-        if clickProgress > 0.01 {
-            let ringRadius = 4 + (clickProgress * 7)
-            let ringRect = CGRect(
-                x: anchor.x - ringRadius,
-                y: anchor.y - ringRadius,
-                width: ringRadius * 2,
-                height: ringRadius * 2
-            )
-            let ring = NSBezierPath(ovalIn: ringRect)
-            NSColor.white.withAlphaComponent(0.22 * (1 - clickProgress * 0.45)).setStroke()
-            ring.lineWidth = 1.0
-            ring.stroke()
-        }
-    }
-
-    private func cursorPath(anchor: CGPoint, scale: CGFloat, xOffset: CGFloat, yOffset: CGFloat) -> NSBezierPath {
-        let points: [CGPoint] = [
-            CGPoint(x: 0, y: 0),
-            CGPoint(x: 0, y: -79 * scale),
-            CGPoint(x: 20 * scale, y: -60 * scale),
-            CGPoint(x: 32 * scale, y: -91 * scale),
-            CGPoint(x: 47 * scale, y: -84 * scale),
-            CGPoint(x: 35 * scale, y: -55 * scale),
-            CGPoint(x: 63 * scale, y: -50 * scale),
-        ]
-
-        let translated = points.map {
-            CGPoint(
-                x: anchor.x + $0.x + xOffset,
-                y: anchor.y + $0.y + yOffset
-            )
-        }
-
-        let path = NSBezierPath()
-        path.move(to: translated[0])
-        for point in translated.dropFirst() {
-            path.line(to: point)
-        }
-        path.close()
-        return path
     }
 }

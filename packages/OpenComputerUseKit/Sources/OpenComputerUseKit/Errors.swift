@@ -1,5 +1,7 @@
 import Foundation
 
+let computerUseNoWindowFoundMessage = "Apple event error -10005: cgWindowNotFound"
+
 public enum ComputerUseError: Error, LocalizedError {
     case message(String)
     case unsupportedTool(String)
@@ -32,6 +34,6 @@ public enum ComputerUseError: Error, LocalizedError {
 
 extension ComputerUseError {
     static func missingArgument(_ name: String) -> ComputerUseError {
-        .invalidArguments("missing argument '\(name)'")
+        .message("Missing required argument: \(name)")
     }
 }

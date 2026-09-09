@@ -5,6 +5,8 @@ import QuartzCore
 
 @MainActor
 enum PermissionOnboardingApp {
+    private static var presentedWindowController: PermissionWindowController?
+
     static func launch() {
         guard !PermissionDiagnostics.current().allGranted else {
             return
@@ -17,6 +19,21 @@ enum PermissionOnboardingApp {
         let delegate = PermissionOnboardingAppDelegate()
         application.delegate = delegate
         application.run()
+    }
+
+    static func present(terminateOnCompletion: Bool = true) {
+        guard !PermissionDiagnostics.current().allGranted else {
+            return
+        }
+
+        let application = NSApplication.shared
+        application.setActivationPolicy(.accessory)
+        application.applicationIconImage = Branding.makeAppIconImage(size: 256)
+
+        let controller = PermissionWindowController(terminateOnCompletion: terminateOnCompletion)
+        presentedWindowController = controller
+        controller.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 }
 
@@ -42,8 +59,11 @@ final class PermissionWindowController: NSWindowController {
     private lazy var accessoryPanelController = PermissionAccessoryPanelController { [weak self] in
         self?.handleAccessoryPanelBack()
     }
+    private let terminateOnCompletion: Bool
 
-    init() {
+    init(terminateOnCompletion: Bool = true) {
+        self.terminateOnCompletion = terminateOnCompletion
+
         let window = NSWindow(
             contentRect: NSRect(
                 x: 0,
@@ -56,7 +76,7 @@ final class PermissionWindowController: NSWindowController {
             defer: false
         )
 
-        window.title = PermissionSupport.bundleDisplayName
+        window.title = PermissionSupport.currentBundleDisplayName()
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
@@ -94,10 +114,17 @@ extension PermissionWindowController: PermissionContentControllerDelegate {
         accessoryPanelController.hide()
     }
 
+    func permissionContentControllerDidRequestRelaunch(_ controller: PermissionContentController) {
+        accessoryPanelController.hide()
+        relaunchCurrentAppBundle()
+    }
+
     func permissionContentControllerDidCompleteAllPermissions(_ controller: PermissionContentController) {
         accessoryPanelController.hide()
         close()
-        NSApp.terminate(nil)
+        if terminateOnCompletion {
+            NSApp.terminate(nil)
+        }
     }
 
     private func handleAccessoryPanelBack() {
@@ -106,6 +133,18 @@ extension PermissionWindowController: PermissionContentControllerDelegate {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func relaunchCurrentAppBundle() {
+        guard let appURL = PermissionSupport.currentAppBundleURL() else {
+            return
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, _ in }
+        NSApp.terminate(nil)
     }
 }
 
@@ -117,6 +156,7 @@ protocol PermissionContentControllerDelegate: AnyObject {
         sourceFrameInScreen: CGRect?
     )
     func permissionContentControllerDidResolveGuidance(_ controller: PermissionContentController)
+    func permissionContentControllerDidRequestRelaunch(_ controller: PermissionContentController)
     func permissionContentControllerDidCompleteAllPermissions(_ controller: PermissionContentController)
 }
 
@@ -144,16 +184,18 @@ final class PermissionContentController: NSViewController {
     private let backgroundView = GradientBackgroundView()
     private let stackView = NSStackView()
     private let iconView = AppGlyphView()
-    private let titleLabel = NSTextField(labelWithString: "Enable Open Computer Use")
-    private let subtitleLabel = NSTextField(wrappingLabelWithString: "Open Computer Use needs these permissions to use apps on your Mac.\nThese permissions are only used when you ask it to perform tasks.")
+    private let titleLabel = NSTextField(labelWithString: "Enable \(PermissionSupport.currentBundleDisplayName())")
+    private let subtitleLabel = NSTextField(wrappingLabelWithString: "\(PermissionSupport.currentBundleDisplayName()) needs these permissions to use apps on your Mac.\nThese permissions are only used when you ask it to perform tasks.")
     private let cardsContainer = NSStackView()
     private let completionLabel = NSTextField(labelWithString: "All required permissions are enabled.")
     private let refreshTimerInterval: TimeInterval = 0.25
+    private let relaunchPromptDelay: TimeInterval = 1.5
 
     private var activeGuidance: SystemPermissionKind?
     private var refreshTimer: Timer?
     private var diagnostics = PermissionDiagnostics.current()
     private var hasReportedCompletion = false
+    private var requestedPermissions: [SystemPermissionKind: Date] = [:]
 
     override func loadView() {
         view = NSView()
@@ -188,6 +230,10 @@ final class PermissionContentController: NSViewController {
 
         if let activeGuidance, updated.isGranted(activeGuidance) {
             self.activeGuidance = nil
+        }
+
+        for permission in SystemPermissionKind.allCases where updated.isGranted(permission) {
+            requestedPermissions[permission] = nil
         }
 
         refreshUI()
@@ -267,18 +313,26 @@ final class PermissionContentController: NSViewController {
 
         let orderedPermissions = SystemPermissionKind.allCases
         for permission in orderedPermissions {
-            if activeGuidance == permission, !diagnostics.isGranted(permission) {
+            let restartRequired = restartRequired(for: permission)
+            if activeGuidance == permission, !diagnostics.isGranted(permission), !restartRequired {
                 let placeholder = GuidancePlaceholderView()
                 cardsContainer.addArrangedSubview(placeholder)
                 placeholder.widthAnchor.constraint(equalToConstant: PermissionOnboardingLayout.cardWidth).isActive = true
                 continue
             }
 
-            let card = PermissionCardView(permission: permission, diagnostics: diagnostics)
+            let card = PermissionCardView(permission: permission, diagnostics: diagnostics, restartRequired: restartRequired)
             card.onAllow = { [weak self] requestedPermission, sourceFrameInScreen in
                 guard let self else {
                     return
                 }
+
+                if self.restartRequired(for: requestedPermission) {
+                    self.delegate?.permissionContentControllerDidRequestRelaunch(self)
+                    return
+                }
+
+                self.requestedPermissions[requestedPermission] = Date()
                 self.delegate?.permissionContentController(
                     self,
                     didRequestPermission: requestedPermission,
@@ -291,6 +345,14 @@ final class PermissionContentController: NSViewController {
 
         completionLabel.isHidden = !diagnostics.allGranted
     }
+
+    private func restartRequired(for permission: SystemPermissionKind) -> Bool {
+        guard !diagnostics.isGranted(permission), let requestedAt = requestedPermissions[permission] else {
+            return false
+        }
+
+        return Date().timeIntervalSince(requestedAt) >= relaunchPromptDelay
+    }
 }
 
 @MainActor
@@ -299,11 +361,13 @@ final class PermissionCardView: NSView {
 
     private let permission: SystemPermissionKind
     private let diagnostics: PermissionDiagnostics
+    private let restartRequired: Bool
     private weak var actionButton: PrimaryActionButton?
 
-    init(permission: SystemPermissionKind, diagnostics: PermissionDiagnostics) {
+    init(permission: SystemPermissionKind, diagnostics: PermissionDiagnostics, restartRequired: Bool = false) {
         self.permission = permission
         self.diagnostics = diagnostics
+        self.restartRequired = restartRequired
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         configure()
@@ -357,7 +421,7 @@ final class PermissionCardView: NSView {
         title.font = NSFont.systemFont(ofSize: 20, weight: .bold)
         title.textColor = NSColor(calibratedWhite: 0.18, alpha: 1)
 
-        let subtitle = NSTextField(labelWithString: permission.subtitle)
+        let subtitle = NSTextField(labelWithString: restartRequired ? "Restart to finish enabling this permission" : permission.subtitle)
         subtitle.font = NSFont.systemFont(ofSize: 14, weight: .regular)
         subtitle.textColor = NSColor(calibratedWhite: 0.42, alpha: 1)
 
@@ -375,7 +439,7 @@ final class PermissionCardView: NSView {
             let done = StatusChipView(text: "Done", foreground: NSColor(calibratedRed: 0.16, green: 0.50, blue: 0.23, alpha: 1), background: NSColor(calibratedRed: 0.93, green: 0.98, blue: 0.94, alpha: 1))
             content.addArrangedSubview(done)
         } else {
-            let button = PrimaryActionButton(title: "Allow", target: self, action: #selector(handleAllow))
+            let button = PrimaryActionButton(title: restartRequired ? "Restart" : "Allow", target: self, action: #selector(handleAllow))
             actionButton = button
             content.addArrangedSubview(button)
             button.widthAnchor.constraint(equalToConstant: PermissionOnboardingLayout.actionButtonWidth).isActive = true
@@ -1113,7 +1177,9 @@ final class DraggableAppTileView: NSView, NSDraggingSource {
 
     private func currentIcon() -> NSImage {
         if let bundleURL = PermissionSupport.currentAppBundleURL() {
-            if let bundle = Bundle(url: bundleURL), bundle.bundleIdentifier == PermissionSupport.bundleIdentifier {
+            if let bundle = Bundle(url: bundleURL),
+               PermissionSupport.isOpenComputerUseBundleIdentifier(bundle.bundleIdentifier)
+            {
                 return Branding.makeAppIconImage(size: 128)
             }
 
@@ -1152,8 +1218,9 @@ enum Branding {
         let image = NSImage(size: NSSize(width: size, height: size))
         image.lockFocus()
 
-        let rect = CGRect(origin: .zero, size: image.size)
-        let tile = NSBezierPath(roundedRect: rect, xRadius: size * 0.22, yRadius: size * 0.22)
+        let canvasInset = size * (92.0 / 1024.0)
+        let rect = CGRect(origin: .zero, size: image.size).insetBy(dx: canvasInset, dy: canvasInset)
+        let tile = NSBezierPath(roundedRect: rect, xRadius: rect.width * 0.22, yRadius: rect.height * 0.22)
 
         let gradient = NSGradient(colors: [
             NSColor(calibratedRed: 0.12, green: 0.67, blue: 0.99, alpha: 1),
@@ -1162,11 +1229,11 @@ enum Branding {
         gradient.draw(in: tile, angle: 20)
 
         func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-            CGPoint(x: size * x / 256, y: size * (1 - y / 256))
+            CGPoint(x: rect.minX + rect.width * x / 256, y: rect.minY + rect.height * (1 - y / 256))
         }
 
         func scale(_ value: CGFloat) -> CGFloat {
-            size * value / 256
+            rect.width * value / 256
         }
 
         let arc = NSBezierPath()

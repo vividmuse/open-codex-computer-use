@@ -88,20 +88,38 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
     private let dragPadView = DragPadView(frame: NSRect(x: 0, y: 0, width: 320, height: 120))
     private var scrollView: NSScrollView!
     private var counter = 0
+    private var activationLossCount = 0
+    private var keyWindowLossCount = 0
     private weak var observedScrollView: NSScrollView?
     private var commandObserver: NSObjectProtocol?
+    private let headless: Bool
+
+    init(headless: Bool) {
+        self.headless = headless
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildWindow()
         startCommandObserver()
         updateExportedState()
-        NSApp.activate(ignoringOtherApps: true)
+        if !headless {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         if let commandObserver {
             DistributedNotificationCenter.default().removeObserver(commandObserver)
         }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        updateExportedState()
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        activationLossCount += 1
+        updateExportedState()
     }
 
     private func buildWindow() {
@@ -183,7 +201,11 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
             inputField.widthAnchor.constraint(equalToConstant: 320),
         ])
 
-        window.makeKeyAndOrderFront(nil)
+        if headless {
+            window.orderOut(nil)
+        } else {
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     @objc
@@ -216,6 +238,15 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
     }
 
     func windowDidResize(_ notification: Notification) {
+        updateExportedState()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        updateExportedState()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        keyWindowLossCount += 1
         updateExportedState()
     }
 
@@ -322,11 +353,12 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
     }
 
     private func updateExportedState() {
-        guard let contentView = window.contentView else {
+        guard let window, let contentView = window.contentView else {
             return
         }
 
         let state = FixtureAppState(
+            processIdentifier: getpid(),
             windowTitle: window.title,
             windowBounds: FixtureRect(rect: windowBoundsInQuartzCoordinates()),
             focusedIdentifier: focusedIdentifier(),
@@ -341,7 +373,11 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
                 element(identifier: "fixture-scroll-view", index: 7, role: "scroll area", title: nil, value: nil, actions: ["Scroll Up", "Scroll Down"], rect: localRect(for: scrollView, in: contentView)),
                 element(identifier: "fixture-drag-status", index: 8, role: "static text", title: nil, value: dragLabel.stringValue, actions: [], rect: localRect(for: dragLabel, in: contentView)),
                 element(identifier: "fixture-drag-pad", index: 9, role: "group", title: "Drag Pad", value: nil, actions: [], rect: localRect(for: dragPadView, in: contentView)),
-            ]
+            ],
+            isActive: NSApp.isActive,
+            isKeyWindow: window.isKeyWindow,
+            activationLossCount: activationLossCount,
+            keyWindowLossCount: keyWindowLossCount
         )
 
         try? FixtureBridge.writeState(state)
@@ -417,11 +453,25 @@ private func debugKeyName(for event: NSEvent) -> String {
 @main
 enum OpenComputerUseFixtureMain {
     @MainActor
+    private static var delegate: FixtureAppDelegate?
+
+    @MainActor
     static func main() {
         let application = NSApplication.shared
-        application.setActivationPolicy(.regular)
-        let delegate = FixtureAppDelegate()
+        let headless = fixtureHeadlessMode()
+        application.setActivationPolicy(headless ? .accessory : .regular)
+        let delegate = FixtureAppDelegate(headless: headless)
+        Self.delegate = delegate
         application.delegate = delegate
         application.run()
+    }
+}
+
+private func fixtureHeadlessMode(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+    switch environment["OPEN_COMPUTER_USE_FIXTURE_HEADLESS"]?.lowercased() {
+    case "1", "true", "yes", "on":
+        return true
+    default:
+        return false
     }
 }

@@ -45,13 +45,17 @@ public enum ToolDefinitions {
                         description: "Mouse button to click. Defaults to left.",
                         enumValues: ["left", "right", "middle"]
                     ),
+                    "click_method": stringProperty(
+                        description: "Click implementation: auto (default), accessibility, app_post, sky_click, or global. Accessibility requires element_index. app_post sends a public event directly to the target app. sky_click uses the macOS SkyLight background window path. Global may move the system pointer and requires OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1.",
+                        enumValues: ClickMethod.allCases.map(\.rawValue)
+                    ),
                 ],
                 required: ["app"]
             )
         ),
         ToolDefinition(
             name: "drag",
-            description: "Drag from one point to another using pixel coordinates. This tool is part of plugin `Computer Use`.",
+            description: "Drag from one point to another using pixel coordinates. By default mouse events are posted directly to the target app and the system pointer does not move; that path cannot drive window-server drag sessions such as window moves, text selection, or Finder drag-and-drop. Those require OPEN_COMPUTER_USE_ALLOW_GLOBAL_POINTER_FALLBACKS=1 in the server process environment, which may move the real pointer. The result reports which path was used. This tool is part of plugin `Computer Use`.",
             annotations: defaultAnnotations(),
             inputSchema: objectSchema(
                 properties: [
@@ -71,6 +75,9 @@ public enum ToolDefinitions {
             inputSchema: objectSchema(
                 properties: [
                     "app": stringProperty(description: "App name or bundle identifier"),
+                    "text_limit": textLimitProperty(description: "Maximum text characters to return. Use \"max\" for full text. Defaults to 500."),
+                    "max_tree_nodes": positiveIntegerProperty(description: "Maximum accessibility tree nodes to render. Defaults to 1200."),
+                    "max_tree_depth": positiveIntegerProperty(description: "Maximum accessibility tree depth to render. Defaults to 64."),
                 ],
                 required: ["app"]
             )
@@ -115,7 +122,7 @@ public enum ToolDefinitions {
                     "app": stringProperty(description: "App name or bundle identifier"),
                     "direction": stringProperty(description: "Scroll direction: up, down, left, or right"),
                     "element_index": stringProperty(description: "Element identifier"),
-                    "pages": integerProperty(description: "Number of page scroll actions. Defaults to 1"),
+                    "pages": numberProperty(description: "Number of pages to scroll. Fractional values are supported. Defaults to 1"),
                 ],
                 required: ["app", "element_index", "direction"]
             )
@@ -194,6 +201,30 @@ private func stringProperty(description: String, enumValues: [String]? = nil) ->
 private func integerProperty(description: String) -> [String: Any] {
     [
         "type": "integer",
+        "description": description,
+    ]
+}
+
+private func positiveIntegerProperty(description: String) -> [String: Any] {
+    [
+        "type": "integer",
+        "minimum": 1,
+        "description": description,
+    ]
+}
+
+private func textLimitProperty(description: String) -> [String: Any] {
+    [
+        "anyOf": [
+            [
+                "type": "integer",
+                "minimum": 1,
+            ],
+            [
+                "type": "string",
+                "enum": [SnapshotTextLimit.maxKeyword],
+            ],
+        ],
         "description": description,
     ]
 }
